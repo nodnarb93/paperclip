@@ -107,6 +107,20 @@ function prepareMarkdownForEditor(value: string): string {
   return convertHtmlImagesToMarkdown(normalizedLineEndings);
 }
 
+// PATCH(nodnarb93): upstream paperclipai/paperclip#2068
+// MDXEditor's underlying parser silently fails (renders empty contenteditable
+// with no console output and no onError callback) on markdown that contains
+// HTML-like tags such as `<br>`, `<SomeTag>`, or `<!-- … -->`, even when the
+// editor is configured with `suppressHtmlProcessing`. The DOM-emptiness watchdog
+// below catches some of these cases but races with Lexical's async commit and
+// is unreliable for this specific failure mode. Pre-detect the pattern from the
+// raw markdown and route to the textarea fallback so users see and can edit
+// their content. Stand-alone `<` (e.g. `if x < 5`, `<=`), URL autolinks
+// (`<https://…>`), and email autolinks (`<foo@bar>`) intentionally do NOT match.
+function markdownContainsRichEditorBreakingTag(value: string): boolean {
+  return /<\/?[A-Za-z][A-Za-z0-9:-]*(?:\s[^<>]*)?\/?>/.test(value);
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -507,6 +521,11 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
   readOnly = false,
 }: MarkdownEditorProps, forwardedRef) {
   const editorValue = useMemo(() => prepareMarkdownForEditor(value), [value]);
+  // PATCH(nodnarb93): upstream paperclipai/paperclip#2068 — see the helper above.
+  const fallbackForcedByContent = useMemo(
+    () => markdownContainsRichEditorBreakingTag(editorValue),
+    [editorValue],
+  );
   const { slashCommands } = useEditorAutocomplete();
   const containerRef = useRef<HTMLDivElement>(null);
   const ref = useRef<MDXEditorMethods>(null);
@@ -930,7 +949,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
       )
     : null;
 
-  if (richEditorError) {
+  if (richEditorError || fallbackForcedByContent) {
     return (
       <div
         ref={containerRef}
@@ -941,16 +960,22 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
         )}
       >
         <div className="flex items-start justify-between gap-3 px-3 pt-2 text-xs text-muted-foreground">
-          <p>Rich editor unavailable for this markdown. Showing raw source instead.</p>
-          <button
-            type="button"
-            className="shrink-0 underline underline-offset-2 hover:text-foreground"
-            onClick={() => {
-              setRichEditorError(null);
-            }}
-          >
-            Retry rich editor
-          </button>
+          <p>
+            {fallbackForcedByContent
+              ? "Rich editor can't render markdown containing HTML-like tags. Showing raw source instead."
+              : "Rich editor unavailable for this markdown. Showing raw source instead."}
+          </p>
+          {!fallbackForcedByContent && (
+            <button
+              type="button"
+              className="shrink-0 underline underline-offset-2 hover:text-foreground"
+              onClick={() => {
+                setRichEditorError(null);
+              }}
+            >
+              Retry rich editor
+            </button>
+          )}
         </div>
         <textarea
           ref={fallbackTextareaRef}
