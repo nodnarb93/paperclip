@@ -109,7 +109,37 @@ If I ever ask you to edit the Docker config, the files to touch are over there �
 
 **Where**: [ui/src/components/MarkdownEditor.tsx](ui/src/components/MarkdownEditor.tsx) — see the `PATCH(nodnarb93)` comments. Commit `e7f9d86e`.
 
-**Conflict-resolution note for future upstream merges**: if upstream changes `MarkdownEditor.tsx`, retain the helper `markdownContainsRichEditorBreakingTag` and the `fallbackForcedByContent` branch. The fix is independent of MDXEditor's own internals — if upstream eventually fixes #2068 at the MDXEditor level, the helper becomes a no-op (regex never matches → `fallbackForcedByContent === false`) and we can remove it as a follow-up.
+**Known tradeoffs (deliberate but imperfect — flagged here so future-me doesn't re-litigate)**:
+
+1. **Mid-typing editor swap.** `MarkdownEditor` is reused across issue composers, chat replies, comments, and agent instructions. If a user types `<SomeTag>` from inside the rich editor, the moment they close the angle bracket the regex matches and the editor swaps to the textarea under their cursor. Caveat: without the patch the editor would have gone empty in that same moment, so the swap is arguably less bad than the bug — but it's still a paper cut.
+2. **No @mentions or /-slash commands in the fallback.** The textarea has no autocomplete. So if my AGENTS.md has any `<br>`-style content, I can't add `@coder` to it without first stripping the HTML.
+3. **No drag-drop image upload in the fallback.** The fallback wrapper doesn't wire up the image-drop handlers that the rich editor branch has.
+4. **False positives on harmless content.** The regex matches anything that *looks* like an HTML tag. So a sentence like *"You can use `<p>` tags in HTML"* gets routed to the fallback even though MDXEditor probably would have rendered the literal text fine. We didn't bisect every variant — we only proved `<word>` breaks it.
+5. **Blast radius is wider than the bug observed.** We saw the bug in agent Instructions, but the patch lives in shared `MarkdownEditor.tsx`, so every place users type markdown in Paperclip is affected.
+
+**Cleaner fix we did NOT take (worth revisiting if any of the tradeoffs above bite)**: make the existing DOM-emptiness watchdog at `MarkdownEditor.tsx:609` actually work — set `richEditorError` only when MDXEditor *empirically* renders empty, not when content *might* break it. The watchdog has timing races (Lexical's async commit vs. `setTimeout(0)` vs. MutationObserver) that I didn't fully diagnose; the pre-detection approach was provably reliable but trades away the cases where MDXEditor would have rendered HTML-like content fine. If a watchdog-based fix lands, both the regex-match path AND `richEditorError` should still trigger fallback, but the regex check would only be belt-and-suspenders.
+
+**Important context: upstream's tests codify the OPPOSITE design**. Two things that came up during PR-prep research and matter for any future work in this area:
+
+- The test mock at `ui/src/components/MarkdownEditor.test.tsx:70` only simulates the empty-render failure when `suppressHtmlProcessing` is *false*. Paperclip passes `suppressHtmlProcessing: true`, so the mock returns content as-is for HTML-tag input. **The mock is the bug** — it lets a wrong assumption pass tests in CI even though production hits the bug.
+- Built on top of that unfaithful mock, the test at `MarkdownEditor.test.tsx:278` is named *"keeps arbitrary HTML-like tags in the rich editor instead of falling back to raw source"* and renders `<section>...<p>Benchmark notes</p></section>` expecting the rich editor to render it. With our patch applied, that test fails. The test at line 302 (*"keeps scriptable pasted HTML inert in the rich editor"*) likely fails too. **Don't run `pnpm test` on this fork expecting green — those two will fail by design.**
+
+These were merged in upstream commit `87f19cd9` (PR #4861, *"Improve issue thread scale and markdown polish"*) authored by Codex GPT-5.5. The PR description claims it "hardened markdown editor behavior around HTML tags," which the failing-on-mock tests appear to vouch for, but in production the hardening doesn't actually trigger for paperclip's `suppressHtmlProcessing: true` config. So the upstream maintainers may not yet realize their tests don't reflect real MDXEditor behavior. If contributing back is ever reconsidered, lead with this finding — it's the most useful thing we know that they don't.
+
+**Conflict-resolution note for future upstream merges**: if upstream changes `MarkdownEditor.tsx`, retain the helper `markdownContainsRichEditorBreakingTag` and the `fallbackForcedByContent` branch. The fix is independent of MDXEditor's own internals — if upstream eventually fixes #2068 at the MDXEditor level (or fixes the mock and watchdog), the regex check becomes a no-op for already-rendering content and we can remove it as a follow-up.
+
+### Patch 2 — `.gitattributes` for LF on `*.sh` and `*.sql`
+
+**Why it exists**: my Windows checkout has `core.autocrlf=true`, which lands `.sh` and `.sql` files in the working tree with CRLF line endings. Two consequences:
+
+1. **Linux refuses to exec shell scripts with `\r` in the shebang** — the entrypoint script in particular crashes the container on first start.
+2. **Drizzle hashes the raw bytes of `.sql` migration files.** CRLF changes the hash, so the migration runner sees every previously-applied migration as un-applied and crashes recreating existing tables. (We hit this on a rebuild and had to debug a restart loop — see commit `4d1641bf`.)
+
+**Fix**: [`.gitattributes`](.gitattributes) at the repo root forces LF for `*.sh` and `*.sql`. After committing it, the working tree was renormalized via `git ls-files -z '*.sh' '*.sql' | xargs -0 rm -f && git checkout HEAD -- '*.sh' '*.sql'` so the existing files actually get LF instead of CRLF on disk. Since we COPY from the working tree into Docker (via the `paperclip-src` named context), this means the image gets LF too.
+
+**Where**: [.gitattributes](.gitattributes). Commit `4d1641bf`.
+
+**Conflict-resolution note**: this should never conflict with upstream — they have no `.gitattributes` of their own. If upstream ever adds one, merge ours with theirs (the union of patterns is fine). The Dockerfile's existing `find . -name '*.sh' … sed 's/\r$//'` is now redundant but harmless; leave it as belt-and-suspenders in case I ever check out on a machine without `.gitattributes` honored.
 
 ## Notes on upstream's build (so you don't have to re-derive it)
 
