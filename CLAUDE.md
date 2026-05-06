@@ -95,14 +95,21 @@ That directory is intentionally **separate** from this source repo. The Docker b
 
 If I ever ask you to edit the Docker config, the files to touch are over there — not in this repo.
 
-## First motivating patch (TBD)
+## Active patches
 
-The original reason I started this fork was the **entry-file display bug in the agent Instructions UI**: see [upstream issue #2068](https://github.com/paperclipai/paperclip/issues/2068).
+### Patch 1 — Instructions UI: AGENTS.md shows empty for content with HTML-like tags
 
-It may already be fixed in `v2026.428.0` (the tag this fork is currently pinned to). **Status: to be verified after the first rebuild.** Once I've confirmed whether it's fixed:
+**Upstream issue**: [paperclipai/paperclip#2068](https://github.com/paperclipai/paperclip/issues/2068) (still OPEN as of v2026.428.0).
 
-- **If fixed**: delete this section.
-- **If not fixed**: write the patch on `local-main`, commit it with a message referencing #2068, and update this section to *"First patch applied: see commit `<sha>`."*
+**Symptom**: in the agent Instructions tab, the entry file (typically `AGENTS.md`) renders empty with only the `# Agent instructions` placeholder, even though the API returns the file's content correctly. There is also no Save button on the entry file. Non-entry files like `HEARTBEAT.md` work fine.
+
+**Root cause**: MDXEditor's underlying parser silently fails to render markdown that contains HTML-like tags (e.g. `<br>`, `<SomeTag>`, `<!-- -->`) — even with `suppressHtmlProcessing: true`. The contenteditable ends up empty with no console error and no `onError` callback. The existing DOM-emptiness watchdog races with Lexical's async commit and is unreliable for this case. (Verified empirically: replacing `<` and `>` chars with `_` made the same content render correctly; `<` followed by space, `<=`, autolinks like `<https://…>`, and email autolinks `<foo@…>` do not trigger the failure.)
+
+**Fix**: pre-detect the dangerous pattern from the raw markdown via `markdownContainsRichEditorBreakingTag`, and route such content to the existing raw-textarea fallback. The user sees and can edit their full content; only the rich-editing experience is downgraded for files with HTML tags.
+
+**Where**: [ui/src/components/MarkdownEditor.tsx](ui/src/components/MarkdownEditor.tsx) — see the `PATCH(nodnarb93)` comments. Commit `e7f9d86e`.
+
+**Conflict-resolution note for future upstream merges**: if upstream changes `MarkdownEditor.tsx`, retain the helper `markdownContainsRichEditorBreakingTag` and the `fallbackForcedByContent` branch. The fix is independent of MDXEditor's own internals — if upstream eventually fixes #2068 at the MDXEditor level, the helper becomes a no-op (regex never matches → `fallbackForcedByContent === false`) and we can remove it as a follow-up.
 
 ## Notes on upstream's build (so you don't have to re-derive it)
 
