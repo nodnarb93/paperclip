@@ -1,0 +1,8 @@
+# PATCH(nodnarb93): force LF on files whose contents Linux/Drizzle interpret
+# byte-exactly. Without this, Windows checkouts with core.autocrlf=true land
+# them with CRLF, which:
+#   - prevents Linux from exec'ing shell scripts (#! has \r in the shebang),
+#   - and changes the SHA hash of .sql migrations so Drizzle sees every
+#     migration as un-applied and crashes recreating existing tables.
+*.sh    text eol=lf
+*.sql   text eol=lf
