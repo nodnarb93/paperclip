@@ -95,6 +95,24 @@ That directory is intentionally **separate** from this source repo. The Docker b
 
 If I ever ask you to edit the Docker config, the files to touch are over there — not in this repo.
 
+## Checkpoints / rollback
+
+Before a non-trivial patch series I tag the current `local-main` HEAD as a rollback anchor. The tags follow the convention `pre-patch-<N>-<short-name>` so it's obvious from `git tag --list 'pre-*'` what state each one represents.
+
+To roll back to a checkpoint if a patch series goes wrong:
+
+```bash
+git checkout local-main
+git reset --hard pre-patch-<N>-<short-name>
+git push origin local-main --force-with-lease     # only if the bad state was already pushed
+```
+
+`--force-with-lease` is the safer cousin of `--force` — it refuses to push if someone else (or another machine) advanced the branch in the meantime. Always prefer it over plain `--force`.
+
+Existing checkpoints:
+
+- **`pre-patch-3-voice-input`** → commit `ab5f63f6`. State of `local-main` just before adding Patch 3 (voice input via Whisper). Patches 1 and 2 are applied; whisper-asr-webservice is running in compose and verified working but no Paperclip code touches it yet.
+
 ## Active patches
 
 ### Patch 1 — Instructions UI: AGENTS.md shows empty for content with HTML-like tags
