@@ -231,7 +231,7 @@ All edits in this repo are tagged with `// PATCH(nodnarb93): voice-undo (Patch 4
 
 All edits in this repo are tagged with `// PATCH(nodnarb93): tts-readaloud (Patch 5)` comments at insertion sites.
 
-**Commits**: `<TBD>` (filled in after the patch is committed).
+**Commits**: `b9d845f6`.
 
 **UX details**:
 
