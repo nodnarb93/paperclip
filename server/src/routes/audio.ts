@@ -57,9 +57,13 @@ export function audioRoutes(_db: Db, opts: { whisperServiceUrl: string }) {
     }
 
     const form = new FormData();
+    // Wrap the multer Buffer in a fresh Uint8Array so the underlying .buffer
+    // is concretely ArrayBuffer (not ArrayBufferLike) — required by current
+    // @types/node + DOM lib's BlobPart shape.
+    const audioBytes = new Uint8Array(file.buffer);
     form.append(
       "audio_file",
-      new Blob([file.buffer], { type: file.mimetype || "audio/webm" }),
+      new Blob([audioBytes], { type: file.mimetype || "audio/webm" }),
       file.originalname || "audio.webm",
     );
 
