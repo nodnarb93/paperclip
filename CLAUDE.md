@@ -179,6 +179,8 @@ These were merged in upstream commit `87f19cd9` (PR #4861, *"Improve issue threa
 
 All edits in this repo are tagged with `// PATCH(nodnarb93): voice-input (Patch 3)` comments at insertion sites for ease of future merges.
 
+**Commits**: main patch `3edbc1ee`. Follow-up TS fix `3e593062` (wrap multer Buffer in Uint8Array for `BlobPart` compatibility with current `@types/node` — DOM `Blob` constructor's `BlobPart` requires concretely-typed `ArrayBuffer`, not Node's `ArrayBufferLike` generic. Apply the same fix in any future place we feed a multer Buffer to a Web-API constructor.)
+
 **UX details**:
 
 - **Deferred spinner**: the recording icon (red square while recording) is the immediate visual signal. A `Loader2` spinner only appears after 3 seconds of transcription wait — local GPU transcriptions usually return in 1-2s, so the spinner avoids flashing for fast requests but still reassures the user for slow ones.
