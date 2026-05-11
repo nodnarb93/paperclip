@@ -198,7 +198,7 @@ All edits in this repo are tagged with `// PATCH(nodnarb93): voice-input (Patch 
 
 All edits in this repo are tagged with `// PATCH(nodnarb93): voice-undo (Patch 4)` comments at insertion sites.
 
-**Commits**: `<TBD>` (filled in after the patch is committed).
+**Commits**: `f81af3f4`.
 
 **Tradeoffs / decisions explicitly made**:
 
