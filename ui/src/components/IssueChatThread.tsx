@@ -108,7 +108,7 @@ import { cn, formatDateTime, formatShortDate } from "../lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
-import { AlertTriangle, ArrowRight, Brain, Check, ChevronDown, Copy, Hammer, Loader2, Mic, MoreHorizontal, Paperclip, PauseCircle, Search, Square, ThumbsDown, ThumbsUp } from "lucide-react";
+import { AlertTriangle, ArrowRight, Brain, Check, ChevronDown, Copy, Hammer, Loader2, Mic, MoreHorizontal, Paperclip, PauseCircle, Search, Square, ThumbsDown, ThumbsUp, Undo2 } from "lucide-react";
 import { IssueBlockedNotice } from "./IssueBlockedNotice";
 
 interface IssueChatMessageContext {
@@ -2632,6 +2632,11 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
   const [isRecording, setIsRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [showTranscribingSpinner, setShowTranscribingSpinner] = useState(false);
+  // PATCH(nodnarb93): voice-undo (Patch 4) — tracks the body state immediately
+  // before and after the most recent transcription insertion. Set when a
+  // transcript lands; cleared on next recording start, on transcription
+  // failure, on manual edit of the body, and on successful undo.
+  const [pendingUndo, setPendingUndo] = useState<{ before: string; after: string } | null>(null);
   const editorRef = useRef<MarkdownEditorRef>(null);
   const composerContainerRef = useRef<HTMLDivElement | null>(null);
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2880,6 +2885,10 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
   // transcribing spinner is deferred 3s to avoid flashing for fast responses.
   async function startVoiceRecording() {
     if (isRecording || transcribing) return;
+    // PATCH(nodnarb93): voice-undo (Patch 4) — starting a new recording
+    // invalidates the previous undo target (clicking mic again is an implicit
+    // commitment to the previous transcription).
+    setPendingUndo(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
@@ -2932,11 +2941,21 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
     try {
       const transcript = await audioApi.transcribe(blob, `voice-${Date.now()}.webm`);
       if (transcript.trim()) {
+        // PATCH(nodnarb93): voice-undo (Patch 4) — capture before/after so the
+        // undo button can revert just this insertion. We compute after the same
+        // way the setBody updater will, so the values stay in sync even if
+        // body changed since the recording started.
+        let beforeSnapshot = "";
         setBody((current) => {
+          beforeSnapshot = current;
           const left = current.trim();
           const right = transcript.trim();
           return left ? `${left} ${right}` : right;
         });
+        const left = beforeSnapshot.trim();
+        const right = transcript.trim();
+        const afterSnapshot = left ? `${left} ${right}` : right;
+        setPendingUndo({ before: beforeSnapshot, after: afterSnapshot });
       } else {
         toastActions?.pushToast({
           title: "No speech detected",
@@ -3020,7 +3039,15 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
       <MarkdownEditor
         ref={editorRef}
         value={body}
-        onChange={setBody}
+        onChange={(next) => {
+          // PATCH(nodnarb93): voice-undo (Patch 4) — any manual edit clears
+          // the undo target; the user has moved on from "fix the last
+          // transcription" mode and undo is no longer a safe one-click revert.
+          if (pendingUndo && next !== pendingUndo.after) {
+            setPendingUndo(null);
+          }
+          setBody(next);
+        }}
         placeholder="Reply"
         mentions={mentions}
         onSubmit={handleSubmit}
@@ -3117,6 +3144,21 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
               <Mic className="h-4 w-4" />
             )}
           </Button>
+          {/* PATCH(nodnarb93): voice-undo (Patch 4) — undo button for the most
+              recent transcription. Auto-hides when user manually edits the body. */}
+          {pendingUndo && !isRecording && !transcribing ? (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => {
+                setBody(pendingUndo.before);
+                setPendingUndo(null);
+              }}
+              title="Undo last transcription"
+            >
+              <Undo2 className="h-4 w-4" />
+            </Button>
+          ) : null}
           {showTranscribingSpinner ? (
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
           ) : null}

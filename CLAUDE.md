@@ -112,6 +112,7 @@ git push origin local-main --force-with-lease     # only if the bad state was al
 Existing checkpoints:
 
 - **`pre-patch-3-voice-input`** → commit `ab5f63f6`. State of `local-main` just before adding Patch 3 (voice input via Whisper). Patches 1 and 2 are applied; whisper-asr-webservice is running in compose and verified working but no Paperclip code touches it yet.
+- **`pre-patch-4-voice-undo`** → commit `af5253cb`. State of `local-main` just before adding Patch 4 (undo button for last voice transcription). Patches 1, 2, 3 are applied and verified.
 
 ## Active patches
 
@@ -180,6 +181,32 @@ These were merged in upstream commit `87f19cd9` (PR #4861, *"Improve issue threa
 All edits in this repo are tagged with `// PATCH(nodnarb93): voice-input (Patch 3)` comments at insertion sites for ease of future merges.
 
 **Commits**: main patch `3edbc1ee`. Follow-up TS fix `3e593062` (wrap multer Buffer in Uint8Array for `BlobPart` compatibility with current `@types/node` — DOM `Blob` constructor's `BlobPart` requires concretely-typed `ArrayBuffer`, not Node's `ArrayBufferLike` generic. Apply the same fix in any future place we feed a multer Buffer to a Web-API constructor.)
+
+### Patch 4 — Undo button for last voice transcription
+
+**Why it exists**: dictating into the composer occasionally produces unwanted output — phantom "Thank you" hallucinations from silent input, accidental recordings, or simply realizing mid-stream that you want to start over. Pre-Patch-4 the only recovery was long-press → select → delete, which is annoying on mobile especially.
+
+**What it does**: after a transcription lands in the composer body, a back-arrow icon (`Undo2`) appears just to the right of the mic button. Clicking it reverts the body to the exact state it was in immediately before the most recent transcription was appended. Auto-hides when the user manually edits the body (signaling they've moved on from "fix the last transcription" mode) or when a new recording starts.
+
+**Key invariants**:
+
+- Undo only ever rolls back **the most recent transcription**, never further. Each new transcription overwrites the previous undo target.
+- Undo does **not** delete other content. If you had typed text + done two transcriptions, then click undo, only the second transcription is removed; your typed text and first transcription stay.
+- Undo is single-use. After clicking it, the state clears — there's no redo, and no "undo the undo." If you change your mind, just dictate again.
+
+**Where**: [ui/src/components/IssueChatThread.tsx](ui/src/components/IssueChatThread.tsx). Adds `Undo2` to lucide imports, `pendingUndo` state (the `{before, after}` snapshot pair), capture inside `transcribeAndInsert`, clear-on-manual-edit wired into MarkdownEditor's `onChange`, clear-on-new-recording wired into `startVoiceRecording`, and the conditional button JSX in the composer toolbar.
+
+All edits in this repo are tagged with `// PATCH(nodnarb93): voice-undo (Patch 4)` comments at insertion sites.
+
+**Commits**: `<TBD>` (filled in after the patch is committed).
+
+**Tradeoffs / decisions explicitly made**:
+
+1. **Auto-dismiss on first manual edit, not on first keystroke.** The check compares the new body value against `pendingUndo.after`. If a user types something that happens to land on the exact same string (e.g., deletes a char and retypes it), undo would stay available — that's fine, it'd produce a correct result. The check is structural, not eventful.
+2. **No keyboard shortcut.** Could add `Cmd/Ctrl+Z` for the same effect, but that would collide with the editor's native undo. Better to keep them separate: editor's native undo for typed text, our button for voice insertions.
+3. **No undo history beyond depth-1.** Each transcription overwrites the prior snapshot. A history stack was considered and rejected as overkill — mental model "undo last voice insertion" is far simpler than "undo Nth voice insertion in reverse order" and covers the actual use case.
+
+**Conflict-resolution note**: this patch only modifies `IssueChatThread.tsx`. If upstream restructures that file or extracts the composer into a smaller component, port the four touchpoints (state declaration, `transcribeAndInsert` snapshot capture, `MarkdownEditor` onChange wrapping, JSX button) — each tagged with `PATCH(nodnarb93): voice-undo` for easy find.
 
 **UX details**:
 
