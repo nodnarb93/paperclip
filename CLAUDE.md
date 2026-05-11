@@ -113,6 +113,7 @@ Existing checkpoints:
 
 - **`pre-patch-3-voice-input`** → commit `ab5f63f6`. State of `local-main` just before adding Patch 3 (voice input via Whisper). Patches 1 and 2 are applied; whisper-asr-webservice is running in compose and verified working but no Paperclip code touches it yet.
 - **`pre-patch-4-voice-undo`** → commit `af5253cb`. State of `local-main` just before adding Patch 4 (undo button for last voice transcription). Patches 1, 2, 3 are applied and verified.
+- **`pre-patch-5-tts-readaloud`** → commit `721b42e9`. State of `local-main` just before adding Patch 5 (read-aloud TTS via openedai-speech sidecar). Patches 1–4 are applied.
 
 ## Active patches
 
@@ -207,6 +208,76 @@ All edits in this repo are tagged with `// PATCH(nodnarb93): voice-undo (Patch 4
 3. **No undo history beyond depth-1.** Each transcription overwrites the prior snapshot. A history stack was considered and rejected as overkill — mental model "undo last voice insertion" is far simpler than "undo Nth voice insertion in reverse order" and covers the actual use case.
 
 **Conflict-resolution note**: this patch only modifies `IssueChatThread.tsx`. If upstream restructures that file or extracts the composer into a smaller component, port the four touchpoints (state declaration, `transcribeAndInsert` snapshot capture, `MarkdownEditor` onChange wrapping, JSX button) — each tagged with `PATCH(nodnarb93): voice-undo` for easy find.
+
+### Patch 5 — Read-aloud TTS for issue descriptions and chat messages
+
+**Upstream issue**: none. Voluntary feature add.
+
+**What it does**: a small speaker icon button (`Volume2` from lucide) appears next to the issue title (reads only the description) and next to each comment's author name in the chat thread (reads only that comment, user or assistant). Click → modal opens → backend POSTs text to the openedai-speech sidecar → audio streams back as MP3 → blob URL → `<audio>` element auto-plays. Modal has standard player controls: play/pause, restart, ±10s skip, scrubbable progress bar, elapsed/total time display. Closing the modal aborts in-flight synthesis (the server's `res.on("close")` handler propagates the abort to the upstream TTS request via `AbortController`, so we don't burn GPU cycles on audio nobody's listening to).
+
+**Where**:
+
+- **Server**:
+  - [server/src/config.ts](server/src/config.ts) — adds `ttsServiceUrl` (env: `PAPERCLIP_TTS_URL`, default `http://tts:8000`).
+  - [server/src/routes/audio.ts](server/src/routes/audio.ts) — adds `POST /audio/synthesize`. Auth-gated. Takes JSON `{ text, voice? }`, forwards to `${ttsServiceUrl}/v1/audio/speech` (OpenAI-compatible shape), streams the response body to the client. Aborts upstream on client disconnect. 50000-char text cap.
+  - [server/src/app.ts](server/src/app.ts), [server/src/index.ts](server/src/index.ts) — wire `ttsServiceUrl` through `createApp` opts.
+- **UI**:
+  - [ui/src/api/audio.ts](ui/src/api/audio.ts) — adds `audioApi.synthesize(text, signal)` that fetches the blob (direct `fetch` not via `api.post` because we need a `Blob`, not JSON).
+  - [ui/src/components/TtsPlayerModal.tsx](ui/src/components/TtsPlayerModal.tsx) — new file. Modal that handles the synthesis request, manages the `<audio>` element, exposes player controls, and cleans up (pauses playback, revokes blob URL, aborts in-flight synthesis) on close.
+  - [ui/src/components/TtsButton.tsx](ui/src/components/TtsButton.tsx) — new file. Tiny wrapper component: `<Button><Volume2 /></Button>` + the modal. Returns `null` for empty text so callers don't have to gate the render.
+  - [ui/src/pages/IssueDetail.tsx](ui/src/pages/IssueDetail.tsx) — adds the TTS button next to the issue title in a flex row. Reads only the issue description, not comments.
+  - [ui/src/components/IssueChatThread.tsx](ui/src/components/IssueChatThread.tsx) — adds the TTS button to both `IssueChatUserMessage` and `IssueChatAssistantMessage` header rows (next to author name + Follow-up badge). Reuses the existing `getThreadMessageCopyText` helper to extract only text parts (skips reasoning/tool-call parts). Hidden during `isRunning` (don't TTS a stream-in-progress); skipped entirely in the foldable chain-of-thought variant.
+- **Docker**: the `tts` service is defined in `D:\Paperclip - Personal\Docker\docker-compose.yml` (not this repo). Recommended image: `ghcr.io/matatonic/openedai-speech` (GPU variant). See the compose snippet at the end of the Patch 5 commit's PR/issue notes.
+
+All edits in this repo are tagged with `// PATCH(nodnarb93): tts-readaloud (Patch 5)` comments at insertion sites.
+
+**Commits**: `<TBD>` (filled in after the patch is committed).
+
+**UX details**:
+
+- **Auto-play on synthesis completion.** Some mobile browsers may block this; in that case the user clicks the play button manually. We don't surface a "click play" hint because the controls are obviously visible and the case is rare.
+- **No "currently playing" indicator on the launcher button.** The modal is the source of truth for playback state. Closing the modal stops playback.
+- **No download / save-audio button.** Considered and skipped — out of scope for "read aloud," and would require keeping the blob URL alive past modal close (memory concerns).
+- **Progress bar is scrubbable** (click to seek). No drag handle — click-to-seek is good enough for short audio.
+
+**Known tradeoffs / decisions explicitly made**:
+
+1. **Server-side streaming, client-side buffer-then-play.** Backend pipes upstream → response in chunks (efficient, lets openedai-speech start generating before the full text is "ready"). Client uses `await response.blob()` which waits for the full body before playback starts. *True* streaming playback on the client (audio plays while still downloading) would require `MediaSource` API + codec hints + edge-case handling — easily doubles the component complexity. For typical comment lengths the wait is 2-5 seconds; acceptable. If a comment is so long that the wait becomes annoying, we'd revisit with MediaSource.
+2. **Markdown sent verbatim to TTS.** No stripping of asterisks, backticks, links, etc. Modern TTS engines handle markdown OK (they mostly ignore the symbols as pauses). Stripping would also strip useful semantic information (e.g., quoted speech in italics). If a particular markdown construct sounds bad, we can revisit per-case.
+3. **No voice selection UI.** Hardcoded to `voice: "alloy"` (openedai-speech default mapping). Adding a voice picker would require either a settings page or a dropdown in the modal — out of scope for v1. Change via the route handler if you want a different default.
+4. **No caching.** Every click regenerates audio. Pre-generating + storing per comment was considered and rejected — comments edit, storage would grow unbounded, re-listening to the same comment is rare. On-demand is fine for single-user use.
+5. **No TTS button on system messages** (status changes, queue notices, etc.) or on the foldable chain-of-thought variant of `IssueChatAssistantMessage`. Both are intentional — short status text doesn't benefit, and CoT blocks aren't worth narrating (they're often code-heavy or contain tool-call JSON).
+6. **TTS button is `icon-xs` on comments, `icon-sm` on the issue title.** Slightly smaller in comment headers to match the more compact row.
+
+**Conflict-resolution note for future upstream merges**:
+
+- `TtsPlayerModal.tsx` and `TtsButton.tsx` are new files unique to this fork — they will never conflict with upstream.
+- If upstream changes `IssueDetail.tsx` around the title/description region (~line 3128 in v2026.428.0), find the new InlineEditor pair and re-wrap the title in the `flex items-start gap-2` div with the `TtsButton` alongside.
+- If upstream restructures `IssueChatUserMessage` or `IssueChatAssistantMessage`, the TTS button is a one-line `<TtsButton text={getThreadMessageCopyText(message)} />` insertion in each header row. Look for the existing Follow-up badge as the anchor.
+- If upstream adds their own TTS / read-aloud feature in core, this patch becomes redundant — delete the patch sites (search for `PATCH(nodnarb93): tts-readaloud`) and either remove the new files or keep them as a fallback implementation.
+- `audioRoutes()`'s opts shape gains `ttsServiceUrl`. Same pattern as `whisperServiceUrl` from Patch 3; if upstream changes the route registration shape, both can be migrated together.
+
+**Compose service required (lives in `D:\Paperclip - Personal\Docker\docker-compose.yml`)**:
+
+```yaml
+  tts:
+    image: ghcr.io/matatonic/openedai-speech:latest
+    container_name: paperclip-tts-personal
+    restart: always
+    environment:
+      - TZ=America/Phoenix
+    volumes:
+      - tts-models:/app/voices
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+
+And add `tts-models:` to the named volumes block at the bottom. No `ports` mapping — internal-only on the Docker network at `http://tts:8000`, which is what `PAPERCLIP_TTS_URL`'s default points at.
 
 **UX details**:
 

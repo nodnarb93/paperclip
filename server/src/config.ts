@@ -91,6 +91,9 @@ export interface Config {
   // sidecar (faster_whisper engine, GPU-enabled). Default points at the
   // service name on the internal Docker network.
   whisperServiceUrl: string;
+  // PATCH(nodnarb93): tts-readaloud (Patch 5). URL of the openedai-speech
+  // sidecar (OpenAI-compatible TTS API, xtts/piper engines).
+  ttsServiceUrl: string;
 }
 
 function detectTailnetBindHost(): string | undefined {
@@ -164,6 +167,9 @@ export function loadConfig(): Config {
   // PATCH(nodnarb93): voice-input (Patch 3) — whisper sidecar URL.
   const whisperServiceUrl =
     process.env.PAPERCLIP_WHISPER_URL?.trim() || "http://whisper:9000";
+  // PATCH(nodnarb93): tts-readaloud (Patch 5) — openedai-speech sidecar URL.
+  const ttsServiceUrl =
+    process.env.PAPERCLIP_TTS_URL?.trim() || "http://tts:8000";
   const feedbackExportBackendToken =
     process.env.PAPERCLIP_FEEDBACK_EXPORT_BACKEND_TOKEN?.trim() ||
     process.env.PAPERCLIP_TELEMETRY_BACKEND_TOKEN?.trim() ||
@@ -341,5 +347,6 @@ export function loadConfig(): Config {
     companyDeletionEnabled,
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
     whisperServiceUrl,
+    ttsServiceUrl,
   };
 }

@@ -1,6 +1,10 @@
 // PATCH(nodnarb93): voice-input (Patch 3) — client wrapper for the
 // /api/audio/transcribe endpoint. Posts a recorded audio blob as multipart,
 // returns the transcript string.
+//
+// PATCH(nodnarb93): tts-readaloud (Patch 5) — client wrapper for the
+// /api/audio/synthesize endpoint. Posts text JSON, returns the audio bytes as
+// a Blob (browser can then create a blob: URL and play it via <audio>).
 import { api } from "./client";
 
 export const audioApi = {
@@ -16,5 +20,25 @@ export const audioApi = {
 
     const result = await api.postForm<{ transcript: string }>("/audio/transcribe", form);
     return result.transcript;
+  },
+
+  synthesize: async (text: string, signal?: AbortSignal): Promise<Blob> => {
+    // Direct fetch (not via api.post) because we need a Blob response, not
+    // JSON. credentials: "include" matches request() in client.ts.
+    const response = await fetch("/api/audio/synthesize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ text }),
+      signal,
+    });
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => null);
+      throw new Error(
+        (errBody as { error?: string } | null)?.error ??
+          `Synthesis failed: ${response.status}`,
+      );
+    }
+    return response.blob();
   },
 };

@@ -619,6 +619,8 @@ export async function startServer(): Promise<StartedServer> {
     pluginWorkerManager,
     // PATCH(nodnarb93): voice-input (Patch 3)
     whisperServiceUrl: config.whisperServiceUrl,
+    // PATCH(nodnarb93): tts-readaloud (Patch 5)
+    ttsServiceUrl: config.ttsServiceUrl,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 

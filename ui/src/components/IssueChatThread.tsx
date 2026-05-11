@@ -40,6 +40,8 @@ import type {
 import type { ActiveRunForIssue, LiveRunForIssue } from "../api/heartbeats";
 // PATCH(nodnarb93): voice-input (Patch 3)
 import { audioApi } from "../api/audio";
+// PATCH(nodnarb93): tts-readaloud (Patch 5)
+import { TtsButton } from "./TtsButton";
 import { useLiveRunTranscripts } from "./transcript/useLiveRunTranscripts";
 import { usePaperclipIssueRuntime, type PaperclipIssueRuntimeReassignment } from "../hooks/usePaperclipIssueRuntime";
 import {
@@ -1211,6 +1213,8 @@ function IssueChatUserMessage({
             Follow-up
           </Badge>
         ) : null}
+        {/* PATCH(nodnarb93): tts-readaloud (Patch 5) — read this comment aloud. */}
+        <TtsButton text={getThreadMessageCopyText(message)} title="Read comment aloud" size="icon-xs" />
       </div>
       <div
         className={cn(
@@ -1436,6 +1440,12 @@ function IssueChatAssistantMessage({
                   <Loader2 className="h-3 w-3 animate-spin" />
                   Running
                 </span>
+              ) : null}
+              {/* PATCH(nodnarb93): tts-readaloud (Patch 5) — read this assistant message aloud.
+                  Only shown when not running (avoid TTS on a stream-in-progress) and not folded
+                  (chain-of-thought blocks aren't worth narrating). */}
+              {!isRunning ? (
+                <TtsButton text={copyText} title="Read message aloud" size="icon-xs" />
               ) : null}
             </div>
           )}

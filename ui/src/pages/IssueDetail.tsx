@@ -63,6 +63,8 @@ import { relativeTime, cn, formatTokens, visibleRunCostUsd } from "../lib/utils"
 import { ApprovalCard } from "../components/ApprovalCard";
 import { InlineEditor } from "../components/InlineEditor";
 import { IssueChatThread, type IssueChatComposerHandle } from "../components/IssueChatThread";
+// PATCH(nodnarb93): tts-readaloud (Patch 5)
+import { TtsButton } from "../components/TtsButton";
 import { IssueContinuationHandoff } from "../components/IssueContinuationHandoff";
 import { IssueDocumentsSection } from "../components/IssueDocumentsSection";
 import { IssuesList } from "../components/IssuesList";
@@ -3120,12 +3122,22 @@ export function IssueDetail() {
           </div>
         </div>
 
-        <InlineEditor
-          value={issue.title}
-          onSave={(title) => updateIssue.mutateAsync({ title })}
-          as="h2"
-          className="text-xl font-bold"
-        />
+        {/* PATCH(nodnarb93): tts-readaloud (Patch 5) — title row gains a
+            read-aloud button on the right that vocalizes the issue description.
+            TtsButton auto-hides when the description is empty. */}
+        <div className="flex items-start gap-2">
+          <InlineEditor
+            value={issue.title}
+            onSave={(title) => updateIssue.mutateAsync({ title })}
+            as="h2"
+            className="min-w-0 flex-1 text-xl font-bold"
+          />
+          <TtsButton
+            text={issue.description ?? ""}
+            title="Read description aloud"
+            className="mt-1 shrink-0"
+          />
+        </div>
 
         <InlineEditor
           value={issue.description ?? ""}

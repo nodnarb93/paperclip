@@ -137,6 +137,8 @@ export async function createApp(
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
     // PATCH(nodnarb93): voice-input (Patch 3) — whisper sidecar URL.
     whisperServiceUrl: string;
+    // PATCH(nodnarb93): tts-readaloud (Patch 5) — openedai-speech sidecar URL.
+    ttsServiceUrl: string;
   },
 ) {
   const app = express();
@@ -195,8 +197,12 @@ export async function createApp(
   api.use(companySkillRoutes(db));
   api.use(agentRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(assetRoutes(db, opts.storageService));
-  // PATCH(nodnarb93): voice-input (Patch 3) — POST /api/audio/transcribe.
-  api.use(audioRoutes(db, { whisperServiceUrl: opts.whisperServiceUrl }));
+  // PATCH(nodnarb93): voice-input (Patch 3) + tts-readaloud (Patch 5) —
+  // POST /api/audio/transcribe and POST /api/audio/synthesize.
+  api.use(audioRoutes(db, {
+    whisperServiceUrl: opts.whisperServiceUrl,
+    ttsServiceUrl: opts.ttsServiceUrl,
+  }));
   api.use(projectRoutes(db));
   api.use(issueRoutes(db, opts.storageService, {
     feedbackExportService: opts.feedbackExportService,
