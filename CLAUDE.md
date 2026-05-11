@@ -159,6 +159,47 @@ These were merged in upstream commit `87f19cd9` (PR #4861, *"Improve issue threa
 
 **Conflict-resolution note**: this should never conflict with upstream — they have no `.gitattributes` of their own. If upstream ever adds one, merge ours with theirs (the union of patterns is fine). The Dockerfile's existing `find . -name '*.sh' … sed 's/\r$//'` is now redundant but harmless; leave it as belt-and-suspenders in case I ever check out on a machine without `.gitattributes` honored.
 
+### Patch 3 — Voice input via local Whisper (mic button in chat composer)
+
+**Upstream issue**: [paperclipai/paperclip#3907](https://github.com/paperclipai/paperclip/issues/3907) — "Command by voice." Triaged by upstream as out of V1 scope (plugin or browser extension territory). I built it into core because the existing plugin SDK has no extension slot inside the chat composer toolbar, so a plugin can't reach where the mic button needs to live.
+
+**What it does**: adds a mic button in the IssueChatThread composer toolbar (next to the existing attach/paperclip button). Click → records mic audio via `MediaRecorder`. Click again → sends the audio blob to a new `POST /api/audio/transcribe` endpoint, which forwards to a sidecar `whisper-asr-webservice` container (faster_whisper engine, GPU-enabled, `large-v3-turbo` model). The transcript is appended to the composer's existing draft body. Works from desktop and from Android Chrome over HTTP when the Paperclip URL is whitelisted in `chrome://flags/#unsafely-treat-insecure-origin-as-secure` (verified end-to-end on Samsung Galaxy S22+ → 4070 Ti Super → `large-v3-turbo`).
+
+**Where**:
+
+- **Server**:
+  - [server/src/config.ts](server/src/config.ts) — added `whisperServiceUrl` (env: `PAPERCLIP_WHISPER_URL`, default `http://whisper:9000`).
+  - [server/src/routes/audio.ts](server/src/routes/audio.ts) — new file. `POST /audio/transcribe` accepts a multipart `audio` field, forwards to `${whisperServiceUrl}/asr?encode=true&task=transcribe&output=json`, returns `{ transcript }`. Auth required via `assertAuthenticated`. 50 MB upload cap.
+  - [server/src/app.ts](server/src/app.ts) — imports `audioRoutes`, adds `whisperServiceUrl` to `createApp` opts, mounts route under `/api`.
+  - [server/src/index.ts](server/src/index.ts) — passes `config.whisperServiceUrl` into `createApp`.
+- **UI**:
+  - [ui/src/api/audio.ts](ui/src/api/audio.ts) — new file. Thin wrapper around `api.postForm` for `/audio/transcribe`. Re-buffers the blob into a fresh `File` to mirror the `assets.ts` clipboard-paste fix (avoids `ERR_ACCESS_DENIED` from transient MediaRecorder blobs).
+  - [ui/src/components/IssueChatThread.tsx](ui/src/components/IssueChatThread.tsx) — adds `Mic`/`Square`/`Loader2` icons + the mic toggle button; adds `isRecording` / `transcribing` / `showTranscribingSpinner` state and `mediaRecorderRef` / `mediaStreamRef` / `audioChunksRef` refs; adds `startVoiceRecording` / `stopVoiceRecording` / `toggleVoiceRecording` / `transcribeAndInsert`; adds `useEffect` cleanup that stops the recorder + mic tracks on unmount. The composer's existing button-row was restructured so the left cluster always renders (the attach button stays conditional on `onImageUpload || onAttachImage`; the mic button is unconditional).
+- **Docker**: the `whisper` service is defined in `D:\Paperclip - Personal\Docker\docker-compose.yml` (not this repo). Image: `onerahmet/openai-whisper-asr-webservice:latest-gpu`. `ASR_MODEL=large-v3-turbo`, `ASR_ENGINE=faster_whisper`, GPU reservation via `deploy.resources.reservations.devices`. Model cache lives in named volume `whisper-models`. No host port mapping in production — internal-only on the default Docker network.
+
+All edits in this repo are tagged with `// PATCH(nodnarb93): voice-input (Patch 3)` comments at insertion sites for ease of future merges.
+
+**UX details**:
+
+- **Deferred spinner**: the recording icon (red square while recording) is the immediate visual signal. A `Loader2` spinner only appears after 3 seconds of transcription wait — local GPU transcriptions usually return in 1-2s, so the spinner avoids flashing for fast requests but still reassures the user for slow ones.
+- **Transcript insertion**: appended to the existing body with a single space separator (or set directly if body was empty). Cursor-position insertion was considered and skipped because MDXEditor's Lexical state is not trivially programmable from outside; appending is good enough and predictable.
+- **Toast on error**: mic permission denied, network error, no speech detected, etc. — all use `toastActions.pushToast` with dedupe keys to avoid stacking.
+
+**Known tradeoffs**:
+
+1. **MediaRecorder format depends on the browser.** Chrome on desktop/Android typically produces `audio/webm;codecs=opus`, Safari produces `audio/mp4;codecs=aac`. Whisper-asr-webservice handles both fine via ffmpeg's `encode=true` flag, but the mime preservation in our blob → form append chain assumes the browser-default is acceptable. If iOS Safari ever becomes a target this is worth re-testing.
+2. **Double-click race.** Two rapid clicks before `getUserMedia` resolves could in principle start two streams. The window is small (the permission prompt + async resolution) but not zero. Not guarded — fix if it ever bites.
+3. **Always-on mic button.** The button is rendered unconditionally in the composer's left cluster, even in surfaces where `onImageUpload`/`onAttachImage` are not wired. That's intentional (voice is useful everywhere), but it does change the rendering of the left cluster from "conditional div" to "always div, conditional contents." Visual layout should be unaffected since `mr-auto` still does its job.
+4. **No-speech detection lives in the response shape, not an error.** Whisper returns `{ text: "" }` for empty/silent recordings — the UI treats empty transcript as a warn-toast rather than a transcription error. Don't confuse `transcript === ""` with a request failure when reading the code.
+5. **`large-v3-turbo` model has slightly weaker non-English / translation performance** than full `large-v3`. For English dictation it's a wash; if I ever start dictating in another language and accuracy drops, switch `ASR_MODEL` in docker-compose to `large-v3` (~6 GB VRAM instead of ~2 GB).
+
+**Conflict-resolution note for future upstream merges**:
+
+- `MarkdownEditor.tsx` is *not* touched by this patch — it's all in `IssueChatThread.tsx` and new files. So Patch 1 and Patch 3 don't conflict with each other.
+- If upstream meaningfully restructures `IssueChatThread.tsx` (especially the composer button row at ~line 2973 in v2026.428.0), find the new equivalent of the attach button's wrapper `<div>` and apply the same "make the left cluster always render, put attach inside fragment, put mic + spinner unconditionally" pattern. The `PATCH(nodnarb93)` comments mark each site.
+- If upstream eventually adds a composer-toolbar extension slot to the plugin SDK (per their triage of #3907), consider migrating Patch 3 into a plugin instead. That would isolate the change from upstream churn entirely. Until then, fork-level patch is the only option.
+- If upstream changes `server/src/app.ts`'s `createApp` opts shape, keep `whisperServiceUrl` in opts; if they add their own opts in the same area, alphabetize and move on.
+
 ## Notes on upstream's build (so you don't have to re-derive it)
 
 - Package manager: `pnpm@9.15.4` via corepack. Engine: Node `>=20`.

@@ -37,6 +37,8 @@ import {
 import { llmRoutes } from "./routes/llms.js";
 import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
+// PATCH(nodnarb93): voice-input (Patch 3)
+import { audioRoutes } from "./routes/audio.js";
 import { accessRoutes } from "./routes/access.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
@@ -133,6 +135,8 @@ export async function createApp(
     pluginWorkerManager?: PluginWorkerManager;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
+    // PATCH(nodnarb93): voice-input (Patch 3) — whisper sidecar URL.
+    whisperServiceUrl: string;
   },
 ) {
   const app = express();
@@ -191,6 +195,8 @@ export async function createApp(
   api.use(companySkillRoutes(db));
   api.use(agentRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(assetRoutes(db, opts.storageService));
+  // PATCH(nodnarb93): voice-input (Patch 3) — POST /api/audio/transcribe.
+  api.use(audioRoutes(db, { whisperServiceUrl: opts.whisperServiceUrl }));
   api.use(projectRoutes(db));
   api.use(issueRoutes(db, opts.storageService, {
     feedbackExportService: opts.feedbackExportService,

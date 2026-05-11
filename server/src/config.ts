@@ -87,6 +87,10 @@ export interface Config {
   heartbeatSchedulerIntervalMs: number;
   companyDeletionEnabled: boolean;
   telemetryEnabled: boolean;
+  // PATCH(nodnarb93): voice-input (Patch 3). URL of the whisper-asr-webservice
+  // sidecar (faster_whisper engine, GPU-enabled). Default points at the
+  // service name on the internal Docker network.
+  whisperServiceUrl: string;
 }
 
 function detectTailnetBindHost(): string | undefined {
@@ -157,6 +161,9 @@ export function loadConfig(): Config {
     process.env.PAPERCLIP_FEEDBACK_EXPORT_BACKEND_URL?.trim() ||
     process.env.PAPERCLIP_TELEMETRY_BACKEND_URL?.trim() ||
     undefined;
+  // PATCH(nodnarb93): voice-input (Patch 3) — whisper sidecar URL.
+  const whisperServiceUrl =
+    process.env.PAPERCLIP_WHISPER_URL?.trim() || "http://whisper:9000";
   const feedbackExportBackendToken =
     process.env.PAPERCLIP_FEEDBACK_EXPORT_BACKEND_TOKEN?.trim() ||
     process.env.PAPERCLIP_TELEMETRY_BACKEND_TOKEN?.trim() ||
@@ -333,5 +340,6 @@ export function loadConfig(): Config {
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
     companyDeletionEnabled,
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
+    whisperServiceUrl,
   };
 }

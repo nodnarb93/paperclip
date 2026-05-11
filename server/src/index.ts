@@ -617,6 +617,8 @@ export async function startServer(): Promise<StartedServer> {
     betterAuthHandler,
     resolveSession,
     pluginWorkerManager,
+    // PATCH(nodnarb93): voice-input (Patch 3)
+    whisperServiceUrl: config.whisperServiceUrl,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 

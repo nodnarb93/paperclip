@@ -38,6 +38,8 @@ import type {
   IssueRelationIssueSummary,
 } from "@paperclipai/shared";
 import type { ActiveRunForIssue, LiveRunForIssue } from "../api/heartbeats";
+// PATCH(nodnarb93): voice-input (Patch 3)
+import { audioApi } from "../api/audio";
 import { useLiveRunTranscripts } from "./transcript/useLiveRunTranscripts";
 import { usePaperclipIssueRuntime, type PaperclipIssueRuntimeReassignment } from "../hooks/usePaperclipIssueRuntime";
 import {
@@ -106,7 +108,7 @@ import { cn, formatDateTime, formatShortDate } from "../lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
-import { AlertTriangle, ArrowRight, Brain, Check, ChevronDown, Copy, Hammer, Loader2, MoreHorizontal, Paperclip, PauseCircle, Search, Square, ThumbsDown, ThumbsUp } from "lucide-react";
+import { AlertTriangle, ArrowRight, Brain, Check, ChevronDown, Copy, Hammer, Loader2, Mic, MoreHorizontal, Paperclip, PauseCircle, Search, Square, ThumbsDown, ThumbsUp } from "lucide-react";
 import { IssueBlockedNotice } from "./IssueBlockedNotice";
 
 interface IssueChatMessageContext {
@@ -2622,6 +2624,14 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
   const [reassignTarget, setReassignTarget] = useState(effectiveSuggestedAssigneeValue);
   const [unassignedConfirmed, setUnassignedConfirmed] = useState(false);
   const attachInputRef = useRef<HTMLInputElement | null>(null);
+  // PATCH(nodnarb93): voice-input (Patch 3) — MediaRecorder + transcription state.
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const transcribingSpinnerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [showTranscribingSpinner, setShowTranscribingSpinner] = useState(false);
   const editorRef = useRef<MarkdownEditorRef>(null);
   const composerContainerRef = useRef<HTMLDivElement | null>(null);
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2864,6 +2874,107 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
     void handleDroppedFiles(evt.dataTransfer?.files);
   }
 
+  // PATCH(nodnarb93): voice-input (Patch 3) — capture mic audio with
+  // MediaRecorder, forward to /api/audio/transcribe, append the result to body.
+  // The recording icon is the primary "something is happening" signal; the
+  // transcribing spinner is deferred 3s to avoid flashing for fast responses.
+  async function startVoiceRecording() {
+    if (isRecording || transcribing) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (e: BlobEvent) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        const tracks = mediaStreamRef.current?.getTracks() ?? [];
+        tracks.forEach((t) => t.stop());
+        mediaStreamRef.current = null;
+        const mimeType = recorder.mimeType || "audio/webm";
+        const blob = new Blob(audioChunksRef.current, { type: mimeType });
+        audioChunksRef.current = [];
+        void transcribeAndInsert(blob);
+      };
+      recorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      toastActions?.pushToast({
+        title: "Microphone unavailable",
+        body: err instanceof Error ? err.message : "Could not access microphone",
+        tone: "error",
+        dedupeKey: "voice-input-mic-permission",
+      });
+    }
+  }
+
+  function stopVoiceRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+    }
+    setIsRecording(false);
+  }
+
+  function toggleVoiceRecording() {
+    if (isRecording) stopVoiceRecording();
+    else void startVoiceRecording();
+  }
+
+  async function transcribeAndInsert(blob: Blob) {
+    setTranscribing(true);
+    setShowTranscribingSpinner(false);
+    transcribingSpinnerTimerRef.current = setTimeout(() => {
+      setShowTranscribingSpinner(true);
+    }, 3000);
+    try {
+      const transcript = await audioApi.transcribe(blob, `voice-${Date.now()}.webm`);
+      if (transcript.trim()) {
+        setBody((current) => {
+          const left = current.trim();
+          const right = transcript.trim();
+          return left ? `${left} ${right}` : right;
+        });
+      } else {
+        toastActions?.pushToast({
+          title: "No speech detected",
+          body: "Try again — speak clearly and close to the mic.",
+          tone: "warn",
+          dedupeKey: "voice-input-empty",
+        });
+      }
+    } catch (err) {
+      toastActions?.pushToast({
+        title: "Voice transcription failed",
+        body: err instanceof Error ? err.message : "Unknown error",
+        tone: "error",
+        dedupeKey: "voice-input-error",
+      });
+    } finally {
+      if (transcribingSpinnerTimerRef.current) {
+        clearTimeout(transcribingSpinnerTimerRef.current);
+        transcribingSpinnerTimerRef.current = null;
+      }
+      setTranscribing(false);
+      setShowTranscribingSpinner(false);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (transcribingSpinnerTimerRef.current) {
+        clearTimeout(transcribingSpinnerTimerRef.current);
+      }
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+      mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
   const canSubmit = !submitting && !!body.trim();
 
   if (composerDisabledReason) {
@@ -2971,25 +3082,45 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
       ) : null}
 
       <div className="flex flex-wrap items-center justify-end gap-3">
-        {(onImageUpload || onAttachImage) ? (
-          <div className="mr-auto flex items-center gap-3">
-            <input
-              ref={attachInputRef}
-              type="file"
-              className="hidden"
-              onChange={handleAttachFile}
-            />
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => attachInputRef.current?.click()}
-              disabled={attaching}
-              title="Attach file"
-            >
-              <Paperclip className="h-4 w-4" />
-            </Button>
-          </div>
-        ) : null}
+        {/* PATCH(nodnarb93): voice-input (Patch 3) — left cluster always renders
+            so the mic button is available even in composers without attach. */}
+        <div className="mr-auto flex items-center gap-3">
+          {(onImageUpload || onAttachImage) ? (
+            <>
+              <input
+                ref={attachInputRef}
+                type="file"
+                className="hidden"
+                onChange={handleAttachFile}
+              />
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => attachInputRef.current?.click()}
+                disabled={attaching}
+                title="Attach file"
+              >
+                <Paperclip className="h-4 w-4" />
+              </Button>
+            </>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={toggleVoiceRecording}
+            disabled={transcribing}
+            title={isRecording ? "Stop recording" : "Voice input"}
+          >
+            {isRecording ? (
+              <Square className="h-4 w-4 fill-current text-red-500" />
+            ) : (
+              <Mic className="h-4 w-4" />
+            )}
+          </Button>
+          {showTranscribingSpinner ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : null}
+        </div>
 
         {enableReassign && reassignOptions.length > 0 ? (
           <InlineEntitySelector
