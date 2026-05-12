@@ -492,7 +492,7 @@ All edits tagged with `// PATCH(nodnarb93): tts-cache-pregen (Patch 9)` comments
 
 All edits tagged with `// PATCH(nodnarb93): tts-polish-2 (Patch 10)` comments at insertion sites.
 
-**Commits**: `<TBD>` (filled in after the patch is committed).
+**Commits**: `18120dbc`.
 
 **Tradeoffs / decisions explicitly made**:
 
