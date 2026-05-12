@@ -128,6 +128,7 @@ Existing checkpoints:
 - **`pre-patch-17-tts-pauses`** → commit `5e756956`. State just before Patch 17 (comma after stripped identifier + period after bullet/numbered list items).
 - **`pre-patch-18-ui-polish`** → commit `42e47d09`. State just before Patch 18 (radius fix, list alternation, sidebar section delineation, mobile nav active color).
 - **`pre-patch-19-manifest-id`** → commit `ab388d1e`. State just before Patch 19 (manifest `id: "/?pwa=paperclip"` for PWA identity uniqueness across multi-app tailnet hosts).
+- **`pre-patch-20-comments-width`** → commit `03c1efa9`. State just before Patch 20 (chat-message separators + wider issue-detail content).
 
 ## Active patches
 

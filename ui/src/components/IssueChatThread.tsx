@@ -2592,10 +2592,15 @@ const IssueChatMessageRow = memo(function IssueChatMessageRow({
       : <IssueChatSystemMessage message={message} />;
 
   return (
+    // PATCH(nodnarb93): comment-separators (Patch 20) — hairline divider
+    // between chat messages so adjacent comments visually separate instead
+    // of bleeding together. last:border-b-0 + last:pb-0 prevents a stray
+    // hairline below the most recent message (above the composer).
     <div
       data-testid="issue-chat-message-row"
       data-message-role={message.role}
       data-message-kind={kind}
+      className="border-b border-border/30 pb-4 last:border-b-0 last:pb-0"
     >
       {renderedMessage}
     </div>
