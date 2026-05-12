@@ -302,7 +302,7 @@ And add `tts-models:` to the named volumes block at the bottom. No `ports` mappi
 
 All edits in this repo are tagged with `// PATCH(nodnarb93): tts-polish (Patch 6)` comments at insertion sites.
 
-**Commits**: `<TBD>` (filled in after the patch is committed).
+**Commits**: `94a26f8c`.
 
 **Tradeoffs / decisions explicitly made**:
 
