@@ -1,17 +1,19 @@
-// PATCH(nodnarb93): tts-readaloud (Patch 5) — modal player for read-aloud
-// audio. On open: POSTs text to /api/audio/synthesize, receives an MP3 blob,
-// creates a blob URL, and plays via <audio>. Controls: play/pause, restart,
-// ±10s skip, scrubbable progress bar, elapsed / total time.
+// PATCH(nodnarb93): tts-readaloud (Patch 5) — player for read-aloud audio.
+// PATCH(nodnarb93): tts-polish (Patch 6) — settings panel, voice picker,
+//   speed pills, localStorage persistence, hidden title.
+// PATCH(nodnarb93): tts-fixes (Patch 7) — non-modal floating widget (does NOT
+//   block page interaction), mobile-responsive layout (top-anchored compact
+//   row with background-gradient progress on mobile, bottom-right full
+//   player on desktop), auto-close 1.5s after audio ends. Component is now
+//   mounted/unmounted by the parent on open/close (replaces radix Dialog),
+//   which means localStorage values are re-read on every open — fixes the
+//   Patch 6 persistence bug where settings only stuck within a single modal
+//   instance, not across modals on the same page.
 //
-// PATCH(nodnarb93): tts-polish (Patch 6) — modal header hidden visually
-// (kept sr-only for a11y), added a settings panel toggleable via a gear icon
-// with voice picker + speed pills. Settings persist to localStorage so the
-// next time the user opens any TTS modal, their choices stick.
-//
-// Lifecycle:
-//   open -> synthesize() -> audio.play()
-//   close -> abort in-flight synthesis -> pause() -> revoke blob URL
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// Despite the file name still being "TtsPlayerModal", this is no longer a
+// modal. Kept the name to minimize diff churn on Patch 7 — rename later if
+// the misnomer bothers future-readers.
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Loader2,
@@ -21,31 +23,23 @@ import {
   RotateCw,
   Settings,
   SkipBack,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { audioApi } from "../api/audio";
 
-interface TtsPlayerModalProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+interface TtsPlayerProps {
   text: string;
   title?: string;
+  onClose: () => void;
 }
 
-// PATCH(nodnarb93): tts-polish (Patch 6) — settings persistence.
-// Voice names match openedai-speech's OpenAI-compatible mapping; speed values
-// are common podcast-app presets. localStorage keys are stable so settings
-// stick across reloads.
 const STORAGE_KEY_VOICE = "paperclip.tts.voice";
 const STORAGE_KEY_SPEED = "paperclip.tts.speed";
-const DEFAULT_VOICE = "alloy";
+// PATCH(nodnarb93): tts-fixes (Patch 7) — Fable (British male) was the user's
+// preferred default; Alloy's high pitch was complained about.
+const DEFAULT_VOICE = "fable";
 const DEFAULT_SPEED = 1;
 const VOICE_OPTIONS: Array<{ value: string; label: string; description: string }> = [
   { value: "alloy", label: "Alloy", description: "Neutral, balanced" },
@@ -56,6 +50,9 @@ const VOICE_OPTIONS: Array<{ value: string; label: string; description: string }
   { value: "shimmer", label: "Shimmer", description: "Softer female" },
 ];
 const SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 1.75, 2];
+// PATCH(nodnarb93): tts-fixes (Patch 7) — auto-close delay after audio ends
+// naturally. 1.5s lets the user see the "ended" state before it disappears.
+const AUTO_CLOSE_DELAY_MS = 1500;
 
 function readStoredVoice(): string {
   if (typeof window === "undefined") return DEFAULT_VOICE;
@@ -79,10 +76,31 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerModalProps) {
+// PATCH(nodnarb93): tts-fixes (Patch 7) — kept the legacy "Modal" name for
+// backward compatibility with existing imports, but it's now an alias for the
+// floating-widget TtsPlayer component. The wrapping component handles the
+// open/closed lifecycle; this inner one only renders when actually visible.
+interface LegacyModalProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  text: string;
+  title?: string;
+}
+
+export function TtsPlayerModal({ open, onOpenChange, text, title }: LegacyModalProps) {
+  if (!open) return null;
+  // PATCH(nodnarb93): tts-fixes (Patch 7) — mounting fresh on each open is
+  // the magic that fixes the persistence bug: useState initializers read
+  // localStorage anew, so settings changed in a previous instance are picked
+  // up by every subsequent one.
+  return <TtsPlayer text={text} title={title} onClose={() => onOpenChange(false)} />;
+}
+
+function TtsPlayer({ text, title, onClose }: TtsPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const blobUrlRef = useRef<string | null>(null);
+  const autoCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -92,6 +110,13 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [voice, setVoice] = useState<string>(() => readStoredVoice());
   const [speed, setSpeed] = useState<number>(() => readStoredSpeed());
+
+  const cancelPendingAutoClose = useCallback(() => {
+    if (autoCloseTimerRef.current) {
+      clearTimeout(autoCloseTimerRef.current);
+      autoCloseTimerRef.current = null;
+    }
+  }, []);
 
   const persistVoice = useCallback((next: string) => {
     setVoice(next);
@@ -111,11 +136,8 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
     }
   }, []);
 
-  // Synthesize when modal opens (or when voice changes — re-render audio with
-  // the new voice). Text changes also re-trigger, though current callers
-  // mount a fresh modal per click so this is defensive.
+  // Synthesize on mount; re-synthesize when voice or text changes.
   useEffect(() => {
-    if (!open) return;
     if (!text.trim()) {
       setError("No text to read.");
       return;
@@ -129,6 +151,7 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
     setIsPlaying(false);
     setCurrentTime(0);
     setDuration(0);
+    cancelPendingAutoClose();
 
     audioApi
       .synthesize(text, { voice, signal: controller.signal })
@@ -148,59 +171,41 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
     return () => {
       controller.abort();
     };
-  }, [open, text, voice]);
+  }, [text, voice, cancelPendingAutoClose]);
 
-  // Auto-play once audio source is set. Apply current playbackRate.
-  // preservesPitch is the standard property — browsers default it to true,
-  // but we set it explicitly to avoid chipmunk audio at 2x.
+  // Auto-play when audio source is set. preservesPitch keeps speeds natural.
   useEffect(() => {
     if (audioUrl && audioRef.current) {
       audioRef.current.playbackRate = speed;
       audioRef.current.preservesPitch = true;
       audioRef.current.play().catch(() => {
-        // Autoplay blocked; user can press play manually.
+        /* autoplay blocked; user can press play manually */
       });
     }
   }, [audioUrl, speed]);
 
-  // Keep playbackRate in sync when speed changes (without re-fetching audio).
+  // Keep playbackRate in sync when speed changes mid-play.
   useEffect(() => {
     if (audioRef.current) {
       audioRef.current.playbackRate = speed;
     }
   }, [speed]);
 
-  // On close: pause playback, abort in-flight synthesis, revoke blob URL,
-  // reset settings panel to collapsed.
-  useEffect(() => {
-    if (open) return;
-    audioRef.current?.pause();
-    abortRef.current?.abort();
-    if (blobUrlRef.current) {
-      URL.revokeObjectURL(blobUrlRef.current);
-      blobUrlRef.current = null;
-    }
-    setAudioUrl(null);
-    setLoading(false);
-    setError(null);
-    setIsPlaying(false);
-    setCurrentTime(0);
-    setDuration(0);
-    setSettingsOpen(false);
-  }, [open]);
-
-  // Final cleanup if the component unmounts mid-play.
+  // Final cleanup on unmount: pause, abort in-flight synth, revoke blob URL.
   useEffect(() => {
     return () => {
+      cancelPendingAutoClose();
       abortRef.current?.abort();
+      audioRef.current?.pause();
       if (blobUrlRef.current) {
         URL.revokeObjectURL(blobUrlRef.current);
         blobUrlRef.current = null;
       }
     };
-  }, []);
+  }, [cancelPendingAutoClose]);
 
   function togglePlayPause() {
+    cancelPendingAutoClose();
     const audio = audioRef.current;
     if (!audio) return;
     if (audio.paused) {
@@ -213,6 +218,7 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
   }
 
   function restart() {
+    cancelPendingAutoClose();
     const audio = audioRef.current;
     if (!audio) return;
     audio.currentTime = 0;
@@ -222,6 +228,7 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
   }
 
   function seekBy(seconds: number) {
+    cancelPendingAutoClose();
     const audio = audioRef.current;
     if (!audio || !Number.isFinite(audio.duration)) return;
     audio.currentTime = Math.max(
@@ -231,37 +238,56 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
   }
 
   function seekToFraction(fraction: number) {
+    cancelPendingAutoClose();
     const audio = audioRef.current;
     if (!audio || !Number.isFinite(audio.duration)) return;
     audio.currentTime = Math.max(0, Math.min(audio.duration, fraction * audio.duration));
   }
 
-  const progressFraction = duration > 0 ? Math.min(1, currentTime / duration) : 0;
+  function handleEnded() {
+    setIsPlaying(false);
+    // PATCH(nodnarb93): tts-fixes (Patch 7) — auto-close shortly after audio
+    // ends naturally. onEnded only fires on completion (not on user pause),
+    // so we don't accidentally close when the user is just taking a break.
+    cancelPendingAutoClose();
+    autoCloseTimerRef.current = setTimeout(() => {
+      onClose();
+    }, AUTO_CLOSE_DELAY_MS);
+  }
 
-  // PATCH(nodnarb93): tts-polish (Patch 6) — keep DialogTitle in the tree for
-  // accessibility (radix warns otherwise) but visually hide it.
-  const a11yTitle = useMemo(
-    () => title ?? "Read aloud",
-    [title],
-  );
+  const progressFraction = duration > 0 ? Math.min(1, currentTime / duration) : 0;
+  const a11yLabel = title ?? "Read aloud";
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogTitle className="sr-only">{a11yTitle}</DialogTitle>
-        <DialogDescription className="sr-only">
-          Audio player for the selected text.
-        </DialogDescription>
-
+    <>
+      {/* PATCH(nodnarb93): tts-fixes (Patch 7) — floating widget container.
+          Mobile (<md): top-anchored, full-width edge-to-edge with small inset.
+          Desktop (≥md): bottom-right, fixed-width.
+          z-50 puts it above issue/comment content but below toasts.
+          aria-label gives screen readers context without modal trap. */}
+      <div
+        role="region"
+        aria-label={a11yLabel}
+        className={cn(
+          "fixed z-50 rounded-lg border border-border/70 bg-background/95 shadow-lg backdrop-blur",
+          "left-2 right-2 top-2 md:left-auto md:right-4 md:top-auto md:bottom-4 md:w-96",
+        )}
+      >
         {loading ? (
-          <div className="flex flex-col items-center gap-2 py-6">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">Synthesizing audio…</p>
+          <div className="flex items-center gap-3 px-3 py-3">
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            <p className="flex-1 text-sm text-muted-foreground">Synthesizing audio…</p>
+            <Button variant="ghost" size="icon-sm" onClick={onClose} title="Close">
+              <X className="h-4 w-4" />
+            </Button>
           </div>
         ) : error ? (
-          <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-destructive">
+          <div className="flex items-start gap-2 p-3 text-destructive">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <p className="text-sm">{error}</p>
+            <p className="flex-1 text-sm">{error}</p>
+            <Button variant="ghost" size="icon-sm" onClick={onClose} title="Close">
+              <X className="h-4 w-4" />
+            </Button>
           </div>
         ) : audioUrl ? (
           <>
@@ -273,83 +299,107 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
               onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
               onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
               onDurationChange={(e) => setDuration(e.currentTarget.duration)}
-              onEnded={() => setIsPlaying(false)}
+              onEnded={handleEnded}
               preload="metadata"
             />
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center justify-between text-xs tabular-nums text-muted-foreground">
-                <span>{formatTime(currentTime)}</span>
-                <span>{formatTime(duration)}</span>
-              </div>
-              <button
-                type="button"
-                className="group relative h-2 w-full overflow-hidden rounded-full bg-muted"
-                onClick={(e) => {
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const fraction = (e.clientX - rect.left) / rect.width;
-                  seekToFraction(fraction);
-                }}
-                aria-label="Seek"
-              >
-                <div
-                  className="absolute inset-y-0 left-0 bg-primary transition-[width] duration-100 group-hover:bg-primary/90"
-                  style={{ width: `${progressFraction * 100}%` }}
-                />
-              </button>
-              <div className="relative flex items-center justify-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={restart}
-                  title="Restart"
+            <div className="relative">
+              {/* PATCH(nodnarb93): tts-fixes (Patch 7) — mobile background
+                  progress gradient. Fills from left to right as audio plays.
+                  Pointer-events-none so it doesn't interfere with clicks. */}
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-0 rounded-lg bg-primary/10 transition-[width] duration-150 md:hidden"
+                style={{ width: `${progressFraction * 100}%` }}
+              />
+
+              {/* DESKTOP: full layout with explicit progress bar */}
+              <div className="hidden flex-col gap-3 p-3 md:flex">
+                <div className="flex items-center justify-between text-xs tabular-nums text-muted-foreground">
+                  <span>{formatTime(currentTime)}</span>
+                  <span>{formatTime(duration)}</span>
+                </div>
+                <button
+                  type="button"
+                  className="group relative h-2 w-full overflow-hidden rounded-full bg-muted"
+                  onClick={(e) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const fraction = (e.clientX - rect.left) / rect.width;
+                    seekToFraction(fraction);
+                  }}
+                  aria-label="Seek"
                 >
+                  <div
+                    className="absolute inset-y-0 left-0 bg-primary transition-[width] duration-100 group-hover:bg-primary/90"
+                    style={{ width: `${progressFraction * 100}%` }}
+                  />
+                </button>
+                <div className="flex items-center justify-center gap-2">
+                  <Button variant="ghost" size="icon-sm" onClick={restart} title="Restart">
+                    <SkipBack className="h-4 w-4" />
+                  </Button>
+                  <Button variant="ghost" size="icon-sm" onClick={() => seekBy(-10)} title="Back 10 seconds">
+                    <RotateCcw className="h-4 w-4" />
+                  </Button>
+                  <Button variant="default" size="icon" onClick={togglePlayPause} title={isPlaying ? "Pause" : "Play"}>
+                    {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
+                  </Button>
+                  <Button variant="ghost" size="icon-sm" onClick={() => seekBy(10)} title="Forward 10 seconds">
+                    <RotateCw className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="ml-auto"
+                    onClick={() => setSettingsOpen((v) => !v)}
+                    title="Voice & speed settings"
+                    aria-expanded={settingsOpen}
+                  >
+                    <Settings className={cn("h-4 w-4 transition-transform", settingsOpen && "rotate-45")} />
+                  </Button>
+                  <Button variant="ghost" size="icon-sm" onClick={onClose} title="Close">
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              {/* MOBILE: single-row compact layout, no explicit progress bar
+                  (the container's bg-gradient shows progress instead) */}
+              <div className="relative flex items-center gap-1 px-2 py-2 md:hidden">
+                <Button variant="ghost" size="icon-sm" onClick={restart} title="Restart">
                   <SkipBack className="h-4 w-4" />
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => seekBy(-10)}
-                  title="Back 10 seconds"
-                >
+                <Button variant="ghost" size="icon-sm" onClick={() => seekBy(-10)} title="Back 10s">
                   <RotateCcw className="h-4 w-4" />
                 </Button>
-                <Button
-                  variant="default"
-                  size="icon"
-                  onClick={togglePlayPause}
-                  title={isPlaying ? "Pause" : "Play"}
-                >
-                  {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
+                <Button variant="default" size="icon-sm" onClick={togglePlayPause} title={isPlaying ? "Pause" : "Play"}>
+                  {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => seekBy(10)}
-                  title="Forward 10 seconds"
-                >
+                <Button variant="ghost" size="icon-sm" onClick={() => seekBy(10)} title="Forward 10s">
                   <RotateCw className="h-4 w-4" />
                 </Button>
-                {/* PATCH(nodnarb93): tts-polish (Patch 6) — settings gear,
-                    pushed to far right via ml-auto so it doesn't shift the
-                    center-aligned playback controls. */}
+                <span className="ml-1 text-[11px] tabular-nums text-muted-foreground">
+                  {formatTime(currentTime)}/{formatTime(duration)}
+                </span>
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   className="ml-auto"
                   onClick={() => setSettingsOpen((v) => !v)}
-                  title="Voice & speed settings"
+                  title="Settings"
                   aria-expanded={settingsOpen}
                 >
                   <Settings className={cn("h-4 w-4 transition-transform", settingsOpen && "rotate-45")} />
                 </Button>
+                <Button variant="ghost" size="icon-sm" onClick={onClose} title="Close">
+                  <X className="h-4 w-4" />
+                </Button>
               </div>
 
+              {/* SETTINGS PANEL — same on mobile and desktop */}
               {settingsOpen ? (
-                <div className="mt-1 flex flex-col gap-3 rounded-md border border-border/60 bg-muted/30 p-3">
+                <div className="relative mt-1 flex flex-col gap-3 rounded-md border-t border-border/60 bg-muted/30 p-3">
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">
-                      Speed
-                    </label>
+                    <label className="text-xs font-medium text-muted-foreground">Speed</label>
                     <div className="flex flex-wrap gap-1">
                       {SPEED_OPTIONS.map((option) => (
                         <button
@@ -369,10 +419,7 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
                     </div>
                   </div>
                   <div className="flex flex-col gap-1.5">
-                    <label
-                      htmlFor="tts-voice-select"
-                      className="text-xs font-medium text-muted-foreground"
-                    >
+                    <label htmlFor="tts-voice-select" className="text-xs font-medium text-muted-foreground">
                       Voice
                     </label>
                     <select
@@ -396,7 +443,7 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
             </div>
           </>
         ) : null}
-      </DialogContent>
-    </Dialog>
+      </div>
+    </>
   );
 }

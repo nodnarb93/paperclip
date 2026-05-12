@@ -15,14 +15,16 @@ import { assertAuthenticated } from "./authz.js";
 const MAX_AUDIO_BYTES = 50 * 1024 * 1024;
 const MAX_TTS_TEXT_CHARS = 50000;
 
-// PATCH(nodnarb93): tts-polish (Patch 6) — strip markdown syntax from text
-// before feeding it to the TTS engine. Without this, the engine reads literal
-// hash signs, asterisks, backticks, etc. — turning a "## Heading" into
-// "hash hash heading". Handles the common markdown constructs; not a full
-// CommonMark parser (intentionally — single 20-line function is easier to
-// debug than a dep). Fenced code blocks become "code block omitted" because
-// reading code character-by-character is universally awful.
-function stripMarkdownForTts(input: string): string {
+// PATCH(nodnarb93): tts-polish (Patch 6) + tts-fixes (Patch 7) — convert raw
+// markdown / AI-generated content into a string that the TTS engine can speak
+// naturally. Two-stage process:
+//   1. stripMarkdown(): remove markdown syntax (headings, bold, code, links, ...)
+//   2. normalizeForSpeech(): replace TTS-hostile patterns with speech-friendly
+//      forms — em-dashes become commas, file paths get segment pauses, common
+//      abbreviations expand, decorative unicode is dropped.
+// Both are simple regex chains by design — a real markdown parser dep would
+// be overkill and harder to tweak per real-world failure case.
+function stripMarkdown(input: string): string {
   return input
     // Fenced code blocks (```lang\n...\n```): omit entirely with a hint.
     .replace(/```[\s\S]*?```/g, " (code block omitted) ")
@@ -54,6 +56,75 @@ function stripMarkdownForTts(input: string): string {
     // Collapse runs of blank lines.
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+// PATCH(nodnarb93): tts-fixes (Patch 7) — speech-friendly normalization.
+// Applies AFTER markdown stripping. Each rule has a comment naming the
+// real-world failure mode it addresses.
+function normalizeForSpeech(input: string): string {
+  return input
+    // ── DASHES → PAUSES ──
+    // Em-dash, en-dash, double-hyphen become commas. AI text loves em-dashes
+    // for emphasis but XTTS skips them without spaces around. Comma forces a
+    // prosodic pause reliably.
+    .replace(/\s*[—–]\s*/g, ", ")
+    .replace(/(\s)--(\s)/g, "$1, $2")
+    // ── FILE PATHS / URLs → SEGMENT PAUSES ──
+    // Match a multi-segment path like "qa/captures/foo-bar/baz.png" and
+    // replace internal slashes with ", " so each segment is spoken with a
+    // natural pause. Excludes URLs starting with "http(s)://" (those have
+    // their own colon-slash-slash structure we don't want to mangle).
+    // Guard: at least two slashes and word chars on both sides.
+    .replace(/(?<!:\/)(?<![\w/])(\w[\w.\-]*\/[\w.\-]+(?:\/[\w.\-]+)+)(?!\/)/g, (match) =>
+      match.split("/").join(", "),
+    )
+    // ── BRANCH-NAME-LIKE TOKENS ──
+    // Patterns like "feat/BIZ-117-foo" — same slash-to-comma treatment but
+    // applies to two-segment forms too (already mostly caught above; this is
+    // a belt-and-suspenders pass for "word/word-with-hyphens" forms).
+    .replace(/\b([a-z]+)\/([\w\-]+)\b/g, "$1, $2")
+    // ── APPROXIMATION TILDE ──
+    // "~10 minutes" → "approximately 10 minutes". Only when followed by a
+    // number or whitespace+number, not in URLs (e.g. /~user/) or as a
+    // standalone character.
+    .replace(/(^|\s)~(\d)/g, "$1approximately $2")
+    // ── COMMON ABBREVIATIONS ──
+    // Order matters: longer phrases first to avoid partial-match issues.
+    .replace(/\ba\.k\.a\.?\b/gi, "also known as")
+    .replace(/\bi\.e\.?,?\b/gi, "that is,")
+    .replace(/\be\.g\.?,?\b/gi, "for example,")
+    .replace(/\betc\.?\b/gi, "etcetera")
+    .replace(/\bvs\.?\b/gi, "versus")
+    .replace(/\bw\/(?=\w)/gi, "with ")
+    .replace(/\bw\/o(?=\W|$)/gi, "without")
+    // ── SYMBOLS ──
+    // & → "and" (most common ambiguity: "& Co." — engine reads "and Co"
+    // which is fine). % → "percent" only when adjacent to a digit. @ left
+    // alone (engines handle email addresses reasonably).
+    .replace(/(\d)\s*%/g, "$1 percent")
+    .replace(/\s&\s/g, " and ")
+    // ── ELLIPSES ──
+    // Three or more dots collapse to the Unicode ellipsis char, which most
+    // engines render as a slightly longer pause than a period.
+    .replace(/\.{3,}/g, "…")
+    // ── DECORATIVE / SYMBOL UNICODE ──
+    // Strip checkmarks, crosses, arrows, bullets that the engine either
+    // reads weirdly or treats as zero-width. Replace with a comma so they
+    // still act as a brief pause where they appeared.
+    .replace(/[✅✓✔☑]/g, ", ")
+    .replace(/[❌✗✘☒]/g, ", ")
+    .replace(/[→←↑↓⇒⇐⇑⇓➡⬅⬆⬇]/g, ", ")
+    .replace(/[•·●○◦▪▫■□]/g, ", ")
+    .replace(/[🎉🚀💡⚠️ℹ️📝📌🔥]/g, " ")
+    // ── CLEANUP ──
+    // Collapse runs of commas/spaces created by the above (e.g. ", , ,").
+    .replace(/(,\s*){2,}/g, ", ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function stripMarkdownForTts(input: string): string {
+  return normalizeForSpeech(stripMarkdown(input));
 }
 
 interface UploadedAudio {

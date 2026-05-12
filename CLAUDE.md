@@ -115,6 +115,7 @@ Existing checkpoints:
 - **`pre-patch-4-voice-undo`** → commit `af5253cb`. State of `local-main` just before adding Patch 4 (undo button for last voice transcription). Patches 1, 2, 3 are applied and verified.
 - **`pre-patch-5-tts-readaloud`** → commit `721b42e9`. State of `local-main` just before adding Patch 5 (read-aloud TTS via openedai-speech sidecar). Patches 1–4 are applied.
 - **`pre-patch-6-tts-polish`** → commit `54debd75`. State of `local-main` just before adding Patch 6 (TTS modal polish: hide title, settings panel with voice picker + speed pills, server-side markdown stripping). Patches 1–5 are applied and verified working.
+- **`pre-patch-7-tts-fixes`** → commit `4dd44a10`. State of `local-main` just before adding Patch 7 (TTS fixes: persistence bug, text normalization expansion, non-blocking floating widget, mobile responsive layout, auto-close on end). Patches 1–6 are applied; known issues from Patch 6 itself: voice/speed didn't persist across modals on same page, TTS mishandled file paths and em-dashes, modal blocked page interaction.
 
 ## Active patches
 
@@ -320,6 +321,62 @@ All edits in this repo are tagged with `// PATCH(nodnarb93): tts-polish (Patch 6
 - The markdown stripper is a pure function — easy to keep across merges. If upstream ever ships a similar helper, switch over to theirs.
 - The settings panel UI lives entirely inside `TtsPlayerModal.tsx` (a file unique to this fork). Will never conflict with upstream.
 - The `voice` field on `/api/audio/synthesize` is forward-compatible: passing it is optional, default fallback is `alloy`. If upstream ever adds their own TTS feature, the API shape is unlikely to conflict.
+
+### Patch 7 — TTS UX fixes: persistence, text normalization, non-blocking widget, auto-close
+
+**Why it exists**: in real use after Patch 6, four problems surfaced:
+
+1. **Voice/speed settings didn't persist** between modals on the same page. The cause: each TtsButton renders its own TtsPlayerModal instance, and `useState(() => readStoredVoice())` runs once at mount (page load). Changing voice in modal A updates localStorage but doesn't propagate to already-mounted modals B/C/D — they're stuck with their stale snapshot.
+2. **TTS mishandled common technical content** — em-dashes were skipped without pauses, file paths were spoken as one long syllable salad, abbreviations like `e.g.` got spelled letter-by-letter, decorative unicode (✅ ✓ →) caused weird artifacts.
+3. **Modal was modal**: clicking the page closed it, the backdrop blocked interaction. Couldn't read the comment while listening to it.
+4. **No auto-close on end**: after audio finished, the widget just sat there. User had to manually click X every time.
+
+**What it does**:
+
+- **Persistence fix via fresh-mount**: `TtsPlayerModal` now returns `null` when `open=false` and renders the inner `TtsPlayer` only when open. The inner component's `useState` initializers run on every mount, picking up the latest localStorage values. No useEffect or pub/sub needed — React's mount/unmount lifecycle does the work.
+- **Default voice → `fable`** (British male — user feedback that `alloy` was harsh).
+- **Text normalization** in `normalizeForSpeech()` on the server, applied after markdown stripping:
+  - Em-dash, en-dash, double-hyphen → comma (forces prosodic pause)
+  - File paths and URLs (multi-segment slash patterns) → slash replaced with comma-space, so each segment is spoken with a natural pause
+  - Branch-name-like tokens (`feat/BIZ-foo`) → same slash-to-comma
+  - Tilde + number → "approximately"
+  - Common abbreviations: `e.g.`, `i.e.`, `etc.`, `vs.`, `a.k.a.`, `w/`, `w/o` → expanded
+  - Symbols: `&` → "and", `N%` → "N percent"
+  - Multiple dots `...` → `…` (renders as longer pause)
+  - Decorative unicode (`✅ ✗ → • 🎉` etc.) stripped or replaced with comma
+  - Cleanup pass collapses runs of commas/whitespace from the above
+- **Non-blocking floating widget**: replaced radix Dialog with a custom fixed-position `<div role="region" aria-label=…>`. No backdrop, no focus trap, no scroll lock, doesn't close on outside click. Z-50 so it floats above content but below toasts. The page underneath is fully interactive.
+- **Mobile-responsive layout** via Tailwind responsive prefixes (`md:`):
+  - **Desktop (≥768px)**: bottom-right, 24rem wide, full layout with explicit progress bar above the controls row.
+  - **Mobile (<768px)**: top-anchored, edge-to-edge (with small inset), single-row controls (`⏮ ↻ ▶ ↺ time ⚙ X`), no explicit progress bar. Instead the **widget's background gradient** fills left-to-right as audio plays — `bg-primary/10` swatch growing with `progressFraction`. Saves vertical screen real estate on mobile while still showing position visually.
+- **Auto-close on end**: `onEnded` schedules a 1.5s timer that calls `onClose`. The timer is cancelled by any user interaction (play/pause/seek/restart/skip) so an explicit "wait, I want to hear that again" gesture keeps the widget open. Critically `onEnded` only fires on natural completion, not on user pause — so pausing keeps the widget around.
+
+**Where**:
+
+- **Server**:
+  - [server/src/routes/audio.ts](server/src/routes/audio.ts) — `stripMarkdownForTts` now composes `stripMarkdown()` + `normalizeForSpeech()`. The normalization function is ~50 lines of commented regex with each rule citing the failure mode it addresses.
+- **UI**:
+  - [ui/src/components/TtsPlayerModal.tsx](ui/src/components/TtsPlayerModal.tsx) — rewritten. `TtsPlayerModal` is now a tiny shell that returns `null` when closed and mounts an inner `TtsPlayer` (the real component) when open. `TtsPlayer` is a fixed-position floating widget, mobile-responsive. File name still says "Modal" for backward-compat with existing imports; it's a misnomer now but renaming was deferred to avoid diff churn.
+
+All edits in this repo are tagged with `// PATCH(nodnarb93): tts-fixes (Patch 7)` comments at insertion sites. Earlier patch comments (Patch 5, Patch 6) are preserved for files they originally touched.
+
+**Commits**: `<TBD>` (filled in after the patch is committed).
+
+**Tradeoffs / decisions explicitly made**:
+
+1. **Fresh-mount-on-open over global state store.** Could have used `useSyncExternalStore` or a Zustand store for "truly shared" settings across all modals simultaneously. But the only failure mode for fresh-mount is "two modals open at exactly the same time with different settings" — which doesn't happen because the user opens one at a time. Fresh-mount is simpler code with the same UX outcome.
+2. **Mobile breakpoint at `md` (768px).** Default Tailwind. If your phone is portrait it gets mobile; landscape iPad gets desktop. Adjust by changing `md:` to `lg:` if that's wrong, but 768px is the standard.
+3. **Background-gradient progress on mobile is decorative, not interactive.** Tapping it doesn't seek (the seek handler is only on the desktop progress bar). Reasoning: mobile has limited horizontal real estate, accidentally tapping a thin progress bar to "seek to 87%" is more annoying than valuable. ±10s buttons cover the actual seek use case.
+4. **Auto-close at 1.5s after end.** Not 0s (jarring), not 3s (sits awkwardly). 1.5s felt right in mental simulation; adjustable via `AUTO_CLOSE_DELAY_MS` constant if needed.
+5. **Symbols stripped, not transliterated to words.** `✅` becomes a comma-pause, not "checkmark." Reading "checkmark" inline is more distracting than the brief pause. Tradeoff is some semantic information loss (a list of items marked with ✅ now has its check-ness erased) — acceptable for read-aloud purposes.
+6. **`@` not normalized**. Email addresses contain `@`. Most TTS engines read `foo@bar.com` reasonably ("foo at bar dot com"). Stripping or replacing would break that.
+7. **CSS class strings not detected/replaced.** Hard to do without false positives on normal hyphenated phrases. If a real-world example continues to be a problem, we'd add detection — but cost/benefit doesn't justify it preemptively.
+
+**Conflict-resolution note for future upstream merges**:
+
+- Patch 7 only modifies files modified or added by Patches 5/6. No upstream collision surface.
+- The radix Dialog replacement in `TtsPlayerModal.tsx` is structurally simple — a fixed-position div with Tailwind classes. If upstream ever adds a similar floating widget elsewhere, look at theirs for styling consistency.
+- `normalizeForSpeech()` is a pure function with no external dependencies. Easy to merge across upstream changes; just keep the function and call site intact.
 
 **UX details**:
 
