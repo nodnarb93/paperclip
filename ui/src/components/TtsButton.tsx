@@ -65,6 +65,15 @@ export function TtsButton({
 
   if (!text.trim()) return null;
 
+  // PATCH(nodnarb93): voice-icon-bump (Patch 14) — explicit icon size that
+  // scales with the button size variant. Previously hardcoded "h-4 w-4" which
+  // gave a 16px speaker regardless of button size; in comment headers
+  // (size="icon" now, was "icon-xs") that looked too small. Picks ~75%-larger
+  // for "icon" (was the comment header complaint), proportionally smaller
+  // for the existing icon-sm (issue title) and icon-xs surfaces.
+  const iconSizeClass =
+    size === "icon" ? "h-7 w-7" : size === "icon-sm" ? "h-4 w-4" : "h-3 w-3";
+
   return (
     <>
       <Button
@@ -76,7 +85,8 @@ export function TtsButton({
       >
         <Volume2
           className={cn(
-            "h-4 w-4 transition-colors",
+            iconSizeClass,
+            "transition-colors",
             isCached && "text-emerald-500 dark:text-emerald-400",
           )}
         />

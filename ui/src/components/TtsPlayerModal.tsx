@@ -46,7 +46,10 @@ const STORAGE_KEY_SPEED = "paperclip.tts.speed";
 // suggested. Native names give consistent, predictable output. Curated to ~15
 // English voices grouped by accent + gender. Kokoro ships ~67 total
 // (including non-English, ASMR, and v0 variants — those omitted here).
-const DEFAULT_VOICE = "bm_fable";
+// PATCH(nodnarb93): default-voice-echo (Patch 14) — was "bm_fable" since
+// Patch 8.2. Echo (am_echo, American male mid-range) is the user's preferred
+// default for new browsers / cleared localStorage / incognito sessions.
+const DEFAULT_VOICE = "am_echo";
 const DEFAULT_SPEED = 1;
 interface VoiceOption {
   value: string;

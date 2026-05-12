@@ -30,7 +30,9 @@ const STORAGE_KEY_MAX_SIZE = "paperclip.tts.cacheMaxSize";
 // back to af_sarah for unknowns) — so a simpler reader keeps the layering
 // clean: the lib module doesn't import presentation concerns.
 const STORAGE_KEY_VOICE = "paperclip.tts.voice";
-const DEFAULT_VOICE = "bm_fable";
+// PATCH(nodnarb93): default-voice-echo (Patch 14) — was "bm_fable" since
+// Patch 8.2; now Echo. Kept in sync with TtsPlayerModal's DEFAULT_VOICE.
+const DEFAULT_VOICE = "am_echo";
 const LEGACY_OPENAI_VOICE_MIGRATION: Record<string, string> = {
   alloy: "af_nicole",
   echo: "am_echo",

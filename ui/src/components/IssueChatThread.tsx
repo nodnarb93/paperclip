@@ -1220,7 +1220,7 @@ function IssueChatUserMessage({
           </Badge>
         ) : null}
         {/* PATCH(nodnarb93): tts-readaloud (Patch 5) — read this comment aloud. */}
-        <TtsButton text={getThreadMessageCopyText(message)} title="Read comment aloud" size="icon-xs" />
+        <TtsButton text={getThreadMessageCopyText(message)} title="Read comment aloud" size="icon" />
       </div>
       <div
         className={cn(
@@ -1451,7 +1451,7 @@ function IssueChatAssistantMessage({
                   Only shown when not running (avoid TTS on a stream-in-progress) and not folded
                   (chain-of-thought blocks aren't worth narrating). */}
               {!isRunning ? (
-                <TtsButton text={copyText} title="Read message aloud" size="icon-xs" />
+                <TtsButton text={copyText} title="Read message aloud" size="icon" />
               ) : null}
             </div>
           )}
