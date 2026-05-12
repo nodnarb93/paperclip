@@ -27,7 +27,9 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { audioApi } from "../api/audio";
+// PATCH(nodnarb93): tts-cache-pregen (Patch 9) — synthesis goes through the
+// LRU cache so repeat clicks on the same comment+voice are instant.
+import { ttsCache } from "../lib/ttsCache";
 
 interface TtsPlayerProps {
   text: string;
@@ -147,9 +149,11 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: LegacyModalP
 
 function TtsPlayer({ text, title, onClose }: TtsPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
   const blobUrlRef = useRef<string | null>(null);
   const autoCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // PATCH(nodnarb93): tts-cache-pregen (Patch 9) — unpin function returned by
+  // ttsCache.pin(), called on unmount to release the cache entry for eviction.
+  const cacheUnpinRef = useRef<(() => void) | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +163,7 @@ function TtsPlayer({ text, title, onClose }: TtsPlayerProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [voice, setVoice] = useState<string>(() => readStoredVoice());
   const [speed, setSpeed] = useState<number>(() => readStoredSpeed());
+  const [cacheMaxSize, setCacheMaxSize] = useState<number>(() => ttsCache.getMaxSize());
 
   const cancelPendingAutoClose = useCallback(() => {
     if (autoCloseTimerRef.current) {
@@ -185,15 +190,14 @@ function TtsPlayer({ text, title, onClose }: TtsPlayerProps) {
     }
   }, []);
 
-  // Synthesize on mount; re-synthesize when voice or text changes.
+  // Synthesize on mount; re-fetch (cache or network) when voice or text changes.
   useEffect(() => {
     if (!text.trim()) {
       setError("No text to read.");
       return;
     }
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+    let stale = false;
     setLoading(true);
     setError(null);
     setAudioUrl(null);
@@ -202,23 +206,30 @@ function TtsPlayer({ text, title, onClose }: TtsPlayerProps) {
     setDuration(0);
     cancelPendingAutoClose();
 
-    audioApi
-      .synthesize(text, { voice, signal: controller.signal })
+    // Release any prior pin before re-acquiring for the new (text, voice).
+    cacheUnpinRef.current?.();
+    cacheUnpinRef.current = ttsCache.pin(text, voice);
+
+    ttsCache
+      .fetch(text, voice)
       .then((blob) => {
-        if (controller.signal.aborted) return;
+        if (stale) return;
+        // Revoke any old URL before creating a new one (defensive — repeat
+        // mounts within the same modal session shouldn't happen, but cheap).
+        if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
         const url = URL.createObjectURL(blob);
         blobUrlRef.current = url;
         setAudioUrl(url);
         setLoading(false);
       })
       .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
+        if (stale) return;
         setError(err instanceof Error ? err.message : "Synthesis failed");
         setLoading(false);
       });
 
     return () => {
-      controller.abort();
+      stale = true;
     };
   }, [text, voice, cancelPendingAutoClose]);
 
@@ -240,12 +251,13 @@ function TtsPlayer({ text, title, onClose }: TtsPlayerProps) {
     }
   }, [speed]);
 
-  // Final cleanup on unmount: pause, abort in-flight synth, revoke blob URL.
+  // Final cleanup on unmount: pause, release cache pin, revoke blob URL.
   useEffect(() => {
     return () => {
       cancelPendingAutoClose();
-      abortRef.current?.abort();
       audioRef.current?.pause();
+      cacheUnpinRef.current?.();
+      cacheUnpinRef.current = null;
       if (blobUrlRef.current) {
         URL.revokeObjectURL(blobUrlRef.current);
         blobUrlRef.current = null;
@@ -466,6 +478,37 @@ function TtsPlayer({ text, title, onClose }: TtsPlayerProps) {
                         </button>
                       ))}
                     </div>
+                  </div>
+                  {/* PATCH(nodnarb93): tts-cache-pregen (Patch 9) — cache size
+                      control. Higher = more audio kept in memory for instant
+                      replay; lower = lower memory footprint. */}
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Audio cache size
+                    </label>
+                    <div className="flex flex-wrap gap-1">
+                      {[5, 10, 15, 25, 50].map((option) => (
+                        <button
+                          key={option}
+                          type="button"
+                          className={cn(
+                            "rounded-full px-2.5 py-1 text-xs tabular-nums transition-colors",
+                            option === cacheMaxSize
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-background text-foreground hover:bg-muted",
+                          )}
+                          onClick={() => {
+                            ttsCache.setMaxSize(option);
+                            setCacheMaxSize(option);
+                          }}
+                        >
+                          {option}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Recently played audio is kept in memory for instant replay; cleared on page reload.
+                    </p>
                   </div>
                   <div className="flex flex-col gap-1.5">
                     <label htmlFor="tts-voice-select" className="text-xs font-medium text-muted-foreground">

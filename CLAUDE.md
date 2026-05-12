@@ -117,6 +117,7 @@ Existing checkpoints:
 - **`pre-patch-6-tts-polish`** → commit `54debd75`. State of `local-main` just before adding Patch 6 (TTS modal polish: hide title, settings panel with voice picker + speed pills, server-side markdown stripping). Patches 1–5 are applied and verified working.
 - **`pre-patch-7-tts-fixes`** → commit `4dd44a10`. State of `local-main` just before adding Patch 7 (TTS fixes: persistence bug, text normalization expansion, non-blocking floating widget, mobile responsive layout, auto-close on end). Patches 1–6 are applied; known issues from Patch 6 itself: voice/speed didn't persist across modals on same page, TTS mishandled file paths and em-dashes, modal blocked page interaction.
 - **`pre-patch-8-kokoro-newissue`** → commit `c5e230d1`. State of `local-main` just before adding Patch 8 (TTS engine swap to Kokoro-FastAPI, Whisper full large-v3, voice input on New Issue dialog). Patches 1–7 applied; known limitations: XTTS robotic cadence, Whisper turbo run-on sentences, voice input only in chat composer.
+- **`pre-patch-9-cache-pregen`** → commit `8e003ffc`. State of `local-main` just before adding Patch 9 (LRU audio cache + last-comment pre-gen + cache-size setting). Patches 1–8 (incl. 8.1 fetch fix and 8.2 native voices) applied and verified.
 
 ## Active patches
 
@@ -425,6 +426,49 @@ All edits in this repo are tagged with `// PATCH(nodnarb93): voice-input-everywh
 - If upstream restructures `IssueChatThread.tsx` substantially, the only voice-related touchpoints to preserve are: import of `useVoiceInput` + `VoiceInputControls`, the `const voice = useVoiceInput(setBody)` line, the `onChange={voice.onComposerChange}` on the MarkdownEditor, and the `<VoiceInputControls voice={voice} />` in the button row.
 - Same for NewIssueDialog: preserve the imports, the `useVoiceInput(setDescription)` call, the `voice.clearUndoOnEdit(nextDescription)` line inside `handleDescriptionChange`, and the `<VoiceInputControls voice={voice} size="icon-xs" />` in the button row.
 - Adding voice to more composers in the future: drop in `const voice = useVoiceInput(<setter>); <VoiceInputControls voice={voice} />` and wire `voice.onComposerChange` (or `voice.clearUndoOnEdit`) into the editor's change path.
+
+### Patch 9 — LRU audio cache + last-comment pre-generation
+
+**Why it exists**: every speaker-icon click was costing a fresh 5-15s round trip to Kokoro for synthesis, even when the user was bouncing between the same few comments. Two related improvements bundled together:
+
+1. **Instant repeat plays**: cache synthesized audio in memory and serve from cache on subsequent clicks for the same `(text, voice)` pair.
+2. **Instant first play on the most recent comment**: pre-fetch its audio when the chat thread mounts/updates, so the most common click (re-listening to the latest reply) feels instant.
+
+**What it does**:
+
+- **In-memory LRU cache** keyed by `${voice}::${textHash}::${textLength}`. Different voices for the same text are different entries (a voice change doesn't invalidate prior entries — you can flip back and hit cached audio). FNV-1a hash keeps keys bounded for long comments.
+- **In-flight dedup**: the cache stores `Blob | Promise<Blob>`. If a click lands while a synthesis is already running for the same key, the second caller awaits the same Promise — no duplicate request.
+- **Pin/unpin**: the currently-playing modal pins its entry so an LRU evict doesn't pull the blob URL out from under the `<audio>` element. Unpinned on modal close.
+- **Pre-generation**: a useEffect in `IssueChatThread` watches the messages array; when it changes, the most recent user/assistant message's text is fed through `ttsCache.fetch(text, currentVoice)` fire-and-forget. Skips system messages, tool-call-only messages, and any message with empty extractable text.
+- **Cache-size setting** in the TTS settings panel: pill row of `5 / 10 / 15 / 25 / 50` (default 15). Stored in localStorage as `paperclip.tts.cacheMaxSize`. When the size shrinks, LRU eviction runs immediately to fit.
+- **Persistence**: in-memory only. Cache is lost on page reload. IndexedDB persistence is a possible follow-up if the cache turns out to feel too fragile in real use.
+
+**Where**:
+
+- [ui/src/lib/ttsCache.ts](ui/src/lib/ttsCache.ts) — new file. The cache singleton + `readPreferredVoice()` helper used by both the modal and the pre-gen path (so they share cache keys for the same user-preferred voice). Mirrors the legacy-OpenAI-voice migration table from TtsPlayerModal so a stale localStorage value like `fable` is treated the same way by pre-gen as it is by the modal (both end up at `bm_fable`).
+- [ui/src/components/TtsPlayerModal.tsx](ui/src/components/TtsPlayerModal.tsx) — `audioApi.synthesize` calls replaced with `ttsCache.fetch`. `ttsCache.pin` called on entering the synthesize useEffect, with an unpin scheduled on unmount. Added a `cacheMaxSize` state + pill-row UI in the settings panel. Removed the abort signal pattern (Patch 8.1 had already removed it for similar reasons; the cache-fetch path doesn't need it because in-flight dedup handles re-clicks naturally).
+- [ui/src/components/IssueChatThread.tsx](ui/src/components/IssueChatThread.tsx) — added a useEffect on the memoized `messages` array that walks backward, finds the most recent text-containing user/assistant message, and calls `ttsCache.fetch` to pre-warm. Fire-and-forget; errors are swallowed.
+
+All edits tagged with `// PATCH(nodnarb93): tts-cache-pregen (Patch 9)` comments at insertion sites.
+
+**Commits**: `<TBD>` (filled in after the patch is committed).
+
+**Tradeoffs / decisions explicitly made**:
+
+1. **In-memory only**, not IndexedDB. Adds complexity (versioning, schema, async API, eviction across two layers). For single-user, cache-lost-on-reload is acceptable — page reloads are infrequent during a working session.
+2. **Pre-gen only for the LAST comment**, not the last N. Lowest-cost option that covers the most common "I just want to listen to the AI's reply again" use case. Could expand later if needed.
+3. **No "clear cache" button.** Cache clears on page reload; a manual flush hasn't been needed in practice. Easy to add to the settings panel later if it becomes useful.
+4. **No visible cache-state UI** (e.g. "audio ready" indicator next to comments). Tradeoff: the cache hit/miss state is implementation detail; surfacing it would be UI noise. Users will feel the cache via instant playback, no explicit indicator needed.
+5. **Hash collision risk: vanishingly small** for FNV-1a 32-bit over ~15 entries of comment-length strings. If it ever happens, worst case is one user-visible "audio doesn't match the comment" event before the next click invalidates.
+6. **No cache invalidation on comment edit.** If a comment is edited, the hash changes (different text), so the old entry stays in the cache but is unreachable. Eventually LRU-evicted. Minor wasted memory; acceptable.
+7. **Pre-gen voice is the *current* preferred voice**, not all voices the user might switch to. Switching voices in the modal triggers a real synthesis (no cache hit) the first time for that new voice on that text — but subsequent plays at the same voice are cached. Acceptable: voice changes are rare relative to repeat plays.
+
+**Conflict-resolution note for future upstream merges**:
+
+- `ttsCache.ts` is unique to this fork — no upstream collision surface.
+- Pre-gen useEffect in `IssueChatThread.tsx` is a single self-contained block tagged with `PATCH(nodnarb93): tts-cache-pregen`. If upstream restructures the messages array's plumbing, port the useEffect to use the new shape.
+- TtsPlayerModal's cache integration replaces an `audioApi.synthesize` call. If upstream adds their own TTS or modifies the modal, preserve the `ttsCache.fetch` + `ttsCache.pin` calls.
+- The `readPreferredVoice` migration table in `ttsCache.ts` duplicates the one in TtsPlayerModal. If you ever change voice migration logic, update both — or refactor into a single shared source.
 
 **UX details**:
 

@@ -40,6 +40,9 @@ import type {
 import type { ActiveRunForIssue, LiveRunForIssue } from "../api/heartbeats";
 // PATCH(nodnarb93): tts-readaloud (Patch 5)
 import { TtsButton } from "./TtsButton";
+// PATCH(nodnarb93): tts-cache-pregen (Patch 9) — pre-generate audio for the
+// most recent comment so the first speaker-icon click is instant.
+import { readPreferredVoice, ttsCache } from "../lib/ttsCache";
 // PATCH(nodnarb93): voice-input-everywhere (Patch 8) — voice logic now lives
 // in a reusable hook + component. Replaces the inline state/refs/functions
 // from Patches 3 (input) and 4 (undo).
@@ -3229,6 +3232,32 @@ export function IssueChatThread({
     stableMessageCacheRef.current = stabilized.cache;
     return stabilized.messages;
   }, [rawMessages]);
+
+  // PATCH(nodnarb93): tts-cache-pregen (Patch 9) — warm the TTS cache for
+  // the most recent user/assistant comment whenever the messages list
+  // changes. Fire-and-forget: errors are non-fatal because a real speaker
+  // click will retry from scratch. Skips system messages, tool-call-only
+  // messages, and any message with empty extractable text.
+  useEffect(() => {
+    if (messages.length === 0) return;
+    let lastWithText: ThreadMessage | null = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== "user" && m.role !== "assistant") continue;
+      const text = getThreadMessageCopyText(m);
+      if (text.trim()) {
+        lastWithText = m;
+        break;
+      }
+    }
+    if (!lastWithText) return;
+    const text = getThreadMessageCopyText(lastWithText);
+    const voice = readPreferredVoice();
+    void ttsCache.fetch(text, voice).catch(() => {
+      // Pre-gen failed (TTS down, network blip, etc.). Silent — user's
+      // real click will retry.
+    });
+  }, [messages]);
 
   const isRunning = displayLiveRuns.some((run) => run.status === "queued" || run.status === "running");
   const unresolvedBlockers = useMemo(
