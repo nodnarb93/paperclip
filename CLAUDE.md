@@ -360,7 +360,7 @@ All edits in this repo are tagged with `// PATCH(nodnarb93): tts-polish (Patch 6
 
 All edits in this repo are tagged with `// PATCH(nodnarb93): tts-fixes (Patch 7)` comments at insertion sites. Earlier patch comments (Patch 5, Patch 6) are preserved for files they originally touched.
 
-**Commits**: `<TBD>` (filled in after the patch is committed).
+**Commits**: `cbf4f260`.
 
 **Tradeoffs / decisions explicitly made**:
 
