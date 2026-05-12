@@ -114,6 +114,7 @@ Existing checkpoints:
 - **`pre-patch-3-voice-input`** → commit `ab5f63f6`. State of `local-main` just before adding Patch 3 (voice input via Whisper). Patches 1 and 2 are applied; whisper-asr-webservice is running in compose and verified working but no Paperclip code touches it yet.
 - **`pre-patch-4-voice-undo`** → commit `af5253cb`. State of `local-main` just before adding Patch 4 (undo button for last voice transcription). Patches 1, 2, 3 are applied and verified.
 - **`pre-patch-5-tts-readaloud`** → commit `721b42e9`. State of `local-main` just before adding Patch 5 (read-aloud TTS via openedai-speech sidecar). Patches 1–4 are applied.
+- **`pre-patch-6-tts-polish`** → commit `54debd75`. State of `local-main` just before adding Patch 6 (TTS modal polish: hide title, settings panel with voice picker + speed pills, server-side markdown stripping). Patches 1–5 are applied and verified working.
 
 ## Active patches
 
@@ -278,6 +279,47 @@ All edits in this repo are tagged with `// PATCH(nodnarb93): tts-readaloud (Patc
 ```
 
 And add `tts-models:` to the named volumes block at the bottom. No `ports` mapping — internal-only on the Docker network at `http://tts:8000`, which is what `PAPERCLIP_TTS_URL`'s default points at.
+
+### Patch 6 — TTS modal polish: markdown stripping + voice picker + speed controls
+
+**Why it exists**: Patch 5 shipped a working TTS modal but with three usability issues: (a) the prominent "Read description aloud" header was visually heavy and unnecessary, (b) no way to change the synthesized voice — default `alloy` was high-pitched/grating, (c) no playback speed control, and (d) the TTS engine read markdown punctuation literally ("hash hash heading" instead of skipping the syntax).
+
+**What it does**:
+
+- **Server-side markdown stripping** in `/api/audio/synthesize`: a `stripMarkdownForTts()` function pre-processes the text before forwarding to openedai-speech. Handles headings, bold/italic, inline code, fenced code blocks (replaced with " (code block omitted) " — code-as-speech is universally awful), images, links, bullet/numbered lists, blockquotes, horizontal rules, and stray HTML tags. Single ~25-line regex function, no new npm deps. Identifier-safe (snake_case underscores aren't treated as italic markers).
+- **Hidden modal header**: `DialogTitle` is kept in the tree for accessibility (radix Dialog warns otherwise — screen readers still get it) but wrapped in `sr-only` so it's invisible to sighted users. Modal becomes a clean audio-player widget.
+- **Settings panel** behind a gear icon in the player controls row. Click → an inline panel expands below the controls (no nested modal — same Dialog, just toggleable content). Click again → collapses. Panel rotates the gear icon 45° to indicate state.
+- **Voice picker**: dropdown in the settings panel with all six openedai-speech voices (alloy, echo, fable, onyx, nova, shimmer) labeled with descriptions. Changing voice re-triggers synthesis with the new voice. Persists to localStorage (`paperclip.tts.voice`).
+- **Speed control**: pill row in the settings panel with values `0.75x / 1x / 1.25x / 1.5x / 1.75x / 2x`. Active value highlighted. Changes apply instantly via `audio.playbackRate` — *client-side* speed adjustment, no re-synthesis required. `audio.preservesPitch = true` keeps voices from going chipmunk at high speeds. Persists to localStorage (`paperclip.tts.speed`).
+
+**Where**:
+
+- **Server**:
+  - [server/src/routes/audio.ts](server/src/routes/audio.ts) — adds `stripMarkdownForTts()` helper; the `synthesize` route now passes user input through it before forwarding to the TTS sidecar. Returns 400 if the post-strip text is empty.
+- **UI**:
+  - [ui/src/api/audio.ts](ui/src/api/audio.ts) — `audioApi.synthesize` signature changed: 2nd arg is now `{ voice?, signal? }` instead of bare `AbortSignal`. Voice is forwarded in the request body if provided.
+  - [ui/src/components/TtsPlayerModal.tsx](ui/src/components/TtsPlayerModal.tsx) — substantially rewritten: hidden title (sr-only), settings gear, expandable panel with voice + speed controls, localStorage persistence helpers, playbackRate sync, voice change triggers re-synthesis. Voice and speed default to localStorage values on mount.
+
+All edits in this repo are tagged with `// PATCH(nodnarb93): tts-polish (Patch 6)` comments at insertion sites.
+
+**Commits**: `<TBD>` (filled in after the patch is committed).
+
+**Tradeoffs / decisions explicitly made**:
+
+1. **Markdown stripping is in-house, not a library.** `remove-markdown` and similar npm packages exist but are ~20 KB once you account for transitive deps, and our regex covers the constructs that actually appear in Paperclip's issue descriptions and chat messages. If a real-world edge case isn't handled, swap to a library — but don't preemptively add a dep.
+2. **Voice change re-synthesizes audio.** It has to — openedai-speech doesn't offer a "re-voice existing audio" API. There's a brief loading state. Acceptable tradeoff because voice is changed rarely (once, usually, the first time the user finds a voice they like).
+3. **Speed is client-side (`playbackRate`), not server-side (`speed` param to TTS).** Even though openedai-speech accepts a `speed` parameter, using it would mean re-synthesizing for every speed change — wasteful and slow. Client-side `playbackRate` is instant and free; `preservesPitch` ensures it sounds natural. The downside is very minor: at 2x the audio is the same duration of *synthesis* but plays in half the time. We don't surface the `speed` server param at all.
+4. **Settings panel is inline-expand, not a separate modal or popover.** Keeps both player and settings visible simultaneously when expanded. Lets users adjust speed mid-playback and immediately hear the result.
+5. **Six voices, hardcoded list.** openedai-speech's voice list is stable (mirrors OpenAI's). If someone deploys with a non-standard backend that supports more voices, they'd hardcode-edit `VOICE_OPTIONS`. Not worth a config endpoint for single-user use.
+6. **localStorage persistence, not server-side user prefs.** Simpler, no API or DB changes. Per-browser, per-device — but that's actually fine: I might want a different default voice on phone vs. desktop, and localStorage gives that for free.
+7. **No per-comment voice override.** Considered; rejected. Adds UI complexity for marginal value.
+
+**Conflict-resolution note for future upstream merges**:
+
+- This patch only modifies files added or already modified in Patch 5. Existing patches' files are untouched.
+- The markdown stripper is a pure function — easy to keep across merges. If upstream ever ships a similar helper, switch over to theirs.
+- The settings panel UI lives entirely inside `TtsPlayerModal.tsx` (a file unique to this fork). Will never conflict with upstream.
+- The `voice` field on `/api/audio/synthesize` is forward-compatible: passing it is optional, default fallback is `alloy`. If upstream ever adds their own TTS feature, the API shape is unlikely to conflict.
 
 **UX details**:
 

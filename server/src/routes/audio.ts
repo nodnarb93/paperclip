@@ -15,6 +15,47 @@ import { assertAuthenticated } from "./authz.js";
 const MAX_AUDIO_BYTES = 50 * 1024 * 1024;
 const MAX_TTS_TEXT_CHARS = 50000;
 
+// PATCH(nodnarb93): tts-polish (Patch 6) — strip markdown syntax from text
+// before feeding it to the TTS engine. Without this, the engine reads literal
+// hash signs, asterisks, backticks, etc. — turning a "## Heading" into
+// "hash hash heading". Handles the common markdown constructs; not a full
+// CommonMark parser (intentionally — single 20-line function is easier to
+// debug than a dep). Fenced code blocks become "code block omitted" because
+// reading code character-by-character is universally awful.
+function stripMarkdownForTts(input: string): string {
+  return input
+    // Fenced code blocks (```lang\n...\n```): omit entirely with a hint.
+    .replace(/```[\s\S]*?```/g, " (code block omitted) ")
+    // Inline code: keep contents, drop backticks.
+    .replace(/`([^`]+)`/g, "$1")
+    // Images: ![alt](src) -> keep alt text only.
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    // Links: [text](href) -> keep visible text only.
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    // Heading markers (#, ##, ### etc.) at the start of a line.
+    .replace(/^#{1,6}\s+/gm, "")
+    // Bold (**text** and __text__) -> keep inner text.
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    // Italic (*text* and _text_) — careful with underscores in identifiers
+    // (e.g. snake_case): require non-word boundaries around _ pairs.
+    .replace(/\*([^*\n]+)\*/g, "$1")
+    .replace(/(^|\W)_([^_\n]+)_(\W|$)/g, "$1$2$3")
+    // Bullet list markers at line start.
+    .replace(/^[\s]*[-*+]\s+/gm, "")
+    // Numbered list markers at line start.
+    .replace(/^[\s]*\d+\.\s+/gm, "")
+    // Blockquote markers.
+    .replace(/^>\s*/gm, "")
+    // Horizontal rules (---, ***, ___ on their own line).
+    .replace(/^(?:-{3,}|\*{3,}|_{3,})\s*$/gm, "")
+    // Stray HTML tags (e.g. <br>, <details>).
+    .replace(/<[^>]+>/g, "")
+    // Collapse runs of blank lines.
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 interface UploadedAudio {
   mimetype: string;
   buffer: Buffer;
@@ -112,14 +153,21 @@ export function audioRoutes(
     assertAuthenticated(req);
 
     const body = req.body as { text?: unknown; voice?: unknown } | undefined;
-    const text = typeof body?.text === "string" ? body.text : "";
+    const rawText = typeof body?.text === "string" ? body.text : "";
     const voice = typeof body?.voice === "string" && body.voice.trim().length > 0 ? body.voice : "alloy";
-    if (!text.trim()) {
+    if (!rawText.trim()) {
       res.status(400).json({ error: "Missing or empty 'text' field" });
       return;
     }
-    if (text.length > MAX_TTS_TEXT_CHARS) {
+    if (rawText.length > MAX_TTS_TEXT_CHARS) {
       res.status(422).json({ error: `Text exceeds ${MAX_TTS_TEXT_CHARS} characters` });
+      return;
+    }
+    // PATCH(nodnarb93): tts-polish (Patch 6) — strip markdown punctuation
+    // before forwarding so the TTS engine doesn't read literal #s and *s.
+    const text = stripMarkdownForTts(rawText);
+    if (!text.trim()) {
+      res.status(400).json({ error: "Text contained no readable content after markdown stripping" });
       return;
     }
 

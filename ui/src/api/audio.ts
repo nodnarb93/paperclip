@@ -22,15 +22,21 @@ export const audioApi = {
     return result.transcript;
   },
 
-  synthesize: async (text: string, signal?: AbortSignal): Promise<Blob> => {
+  synthesize: async (
+    text: string,
+    options?: { voice?: string; signal?: AbortSignal },
+  ): Promise<Blob> => {
     // Direct fetch (not via api.post) because we need a Blob response, not
     // JSON. credentials: "include" matches request() in client.ts.
     const response = await fetch("/api/audio/synthesize", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ text }),
-      signal,
+      body: JSON.stringify({
+        text,
+        ...(options?.voice ? { voice: options.voice } : {}),
+      }),
+      signal: options?.signal,
     });
     if (!response.ok) {
       const errBody = await response.json().catch(() => null);

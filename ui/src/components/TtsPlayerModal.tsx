@@ -1,12 +1,17 @@
 // PATCH(nodnarb93): tts-readaloud (Patch 5) — modal player for read-aloud
 // audio. On open: POSTs text to /api/audio/synthesize, receives an MP3 blob,
 // creates a blob URL, and plays via <audio>. Controls: play/pause, restart,
-// ±10s skip, progress bar (scrubbable), elapsed / total time.
+// ±10s skip, scrubbable progress bar, elapsed / total time.
+//
+// PATCH(nodnarb93): tts-polish (Patch 6) — modal header hidden visually
+// (kept sr-only for a11y), added a settings panel toggleable via a gear icon
+// with voice picker + speed pills. Settings persist to localStorage so the
+// next time the user opens any TTS modal, their choices stick.
 //
 // Lifecycle:
 //   open -> synthesize() -> audio.play()
 //   close -> abort in-flight synthesis -> pause() -> revoke blob URL
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Loader2,
@@ -14,6 +19,7 @@ import {
   Play,
   RotateCcw,
   RotateCw,
+  Settings,
   SkipBack,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -21,9 +27,9 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
 import { audioApi } from "../api/audio";
 
 interface TtsPlayerModalProps {
@@ -31,6 +37,39 @@ interface TtsPlayerModalProps {
   onOpenChange: (open: boolean) => void;
   text: string;
   title?: string;
+}
+
+// PATCH(nodnarb93): tts-polish (Patch 6) — settings persistence.
+// Voice names match openedai-speech's OpenAI-compatible mapping; speed values
+// are common podcast-app presets. localStorage keys are stable so settings
+// stick across reloads.
+const STORAGE_KEY_VOICE = "paperclip.tts.voice";
+const STORAGE_KEY_SPEED = "paperclip.tts.speed";
+const DEFAULT_VOICE = "alloy";
+const DEFAULT_SPEED = 1;
+const VOICE_OPTIONS: Array<{ value: string; label: string; description: string }> = [
+  { value: "alloy", label: "Alloy", description: "Neutral, balanced" },
+  { value: "echo", label: "Echo", description: "Mid-range male" },
+  { value: "fable", label: "Fable", description: "British male" },
+  { value: "onyx", label: "Onyx", description: "Deep male, news-anchor" },
+  { value: "nova", label: "Nova", description: "Warm female, podcast host" },
+  { value: "shimmer", label: "Shimmer", description: "Softer female" },
+];
+const SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 1.75, 2];
+
+function readStoredVoice(): string {
+  if (typeof window === "undefined") return DEFAULT_VOICE;
+  const stored = window.localStorage.getItem(STORAGE_KEY_VOICE);
+  if (stored && VOICE_OPTIONS.some((v) => v.value === stored)) return stored;
+  return DEFAULT_VOICE;
+}
+
+function readStoredSpeed(): number {
+  if (typeof window === "undefined") return DEFAULT_SPEED;
+  const stored = window.localStorage.getItem(STORAGE_KEY_SPEED);
+  const parsed = stored ? Number(stored) : NaN;
+  if (Number.isFinite(parsed) && SPEED_OPTIONS.includes(parsed)) return parsed;
+  return DEFAULT_SPEED;
 }
 
 function formatTime(seconds: number): string {
@@ -50,10 +89,31 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [voice, setVoice] = useState<string>(() => readStoredVoice());
+  const [speed, setSpeed] = useState<number>(() => readStoredSpeed());
 
-  // Kick off synthesis when the modal opens. We re-run on text change so the
-  // same modal can be reused for different content (defensive — current usage
-  // mounts/unmounts per click, but cheap to support).
+  const persistVoice = useCallback((next: string) => {
+    setVoice(next);
+    try {
+      window.localStorage.setItem(STORAGE_KEY_VOICE, next);
+    } catch {
+      // ignore — private mode etc.
+    }
+  }, []);
+
+  const persistSpeed = useCallback((next: number) => {
+    setSpeed(next);
+    try {
+      window.localStorage.setItem(STORAGE_KEY_SPEED, String(next));
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Synthesize when modal opens (or when voice changes — re-render audio with
+  // the new voice). Text changes also re-trigger, though current callers
+  // mount a fresh modal per click so this is defensive.
   useEffect(() => {
     if (!open) return;
     if (!text.trim()) {
@@ -71,7 +131,7 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
     setDuration(0);
 
     audioApi
-      .synthesize(text, controller.signal)
+      .synthesize(text, { voice, signal: controller.signal })
       .then((blob) => {
         if (controller.signal.aborted) return;
         const url = URL.createObjectURL(blob);
@@ -88,22 +148,30 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
     return () => {
       controller.abort();
     };
-  }, [open, text]);
+  }, [open, text, voice]);
 
-  // Auto-play once the audio source is set. Some browsers (mobile especially)
-  // refuse autoplay without user interaction — but the user JUST clicked the
-  // TTS button, which counts as interaction. .play() returns a Promise that
-  // can reject in autoplay-blocked contexts; we swallow that and let the user
-  // click play manually.
+  // Auto-play once audio source is set. Apply current playbackRate.
+  // preservesPitch is the standard property — browsers default it to true,
+  // but we set it explicitly to avoid chipmunk audio at 2x.
   useEffect(() => {
     if (audioUrl && audioRef.current) {
+      audioRef.current.playbackRate = speed;
+      audioRef.current.preservesPitch = true;
       audioRef.current.play().catch(() => {
         // Autoplay blocked; user can press play manually.
       });
     }
-  }, [audioUrl]);
+  }, [audioUrl, speed]);
 
-  // On close: pause playback, abort in-flight synthesis, revoke blob URL.
+  // Keep playbackRate in sync when speed changes (without re-fetching audio).
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.playbackRate = speed;
+    }
+  }, [speed]);
+
+  // On close: pause playback, abort in-flight synthesis, revoke blob URL,
+  // reset settings panel to collapsed.
   useEffect(() => {
     if (open) return;
     audioRef.current?.pause();
@@ -118,9 +186,10 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
     setIsPlaying(false);
     setCurrentTime(0);
     setDuration(0);
+    setSettingsOpen(false);
   }, [open]);
 
-  // Final cleanup if the component unmounts mid-play (defensive).
+  // Final cleanup if the component unmounts mid-play.
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
@@ -136,7 +205,7 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
     if (!audio) return;
     if (audio.paused) {
       audio.play().catch(() => {
-        /* user-gesture issue, ignore */
+        /* ignore */
       });
     } else {
       audio.pause();
@@ -169,15 +238,20 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
 
   const progressFraction = duration > 0 ? Math.min(1, currentTime / duration) : 0;
 
+  // PATCH(nodnarb93): tts-polish (Patch 6) — keep DialogTitle in the tree for
+  // accessibility (radix warns otherwise) but visually hide it.
+  const a11yTitle = useMemo(
+    () => title ?? "Read aloud",
+    [title],
+  );
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{title ?? "Read aloud"}</DialogTitle>
-          <DialogDescription className="sr-only">
-            Audio player for the selected text.
-          </DialogDescription>
-        </DialogHeader>
+        <DialogTitle className="sr-only">{a11yTitle}</DialogTitle>
+        <DialogDescription className="sr-only">
+          Audio player for the selected text.
+        </DialogDescription>
 
         {loading ? (
           <div className="flex flex-col items-center gap-2 py-6">
@@ -222,7 +296,7 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
                   style={{ width: `${progressFraction * 100}%` }}
                 />
               </button>
-              <div className="flex items-center justify-center gap-2">
+              <div className="relative flex items-center justify-center gap-2">
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -255,7 +329,70 @@ export function TtsPlayerModal({ open, onOpenChange, text, title }: TtsPlayerMod
                 >
                   <RotateCw className="h-4 w-4" />
                 </Button>
+                {/* PATCH(nodnarb93): tts-polish (Patch 6) — settings gear,
+                    pushed to far right via ml-auto so it doesn't shift the
+                    center-aligned playback controls. */}
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="ml-auto"
+                  onClick={() => setSettingsOpen((v) => !v)}
+                  title="Voice & speed settings"
+                  aria-expanded={settingsOpen}
+                >
+                  <Settings className={cn("h-4 w-4 transition-transform", settingsOpen && "rotate-45")} />
+                </Button>
               </div>
+
+              {settingsOpen ? (
+                <div className="mt-1 flex flex-col gap-3 rounded-md border border-border/60 bg-muted/30 p-3">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Speed
+                    </label>
+                    <div className="flex flex-wrap gap-1">
+                      {SPEED_OPTIONS.map((option) => (
+                        <button
+                          key={option}
+                          type="button"
+                          className={cn(
+                            "rounded-full px-2.5 py-1 text-xs tabular-nums transition-colors",
+                            option === speed
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-background text-foreground hover:bg-muted",
+                          )}
+                          onClick={() => persistSpeed(option)}
+                        >
+                          {option}x
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label
+                      htmlFor="tts-voice-select"
+                      className="text-xs font-medium text-muted-foreground"
+                    >
+                      Voice
+                    </label>
+                    <select
+                      id="tts-voice-select"
+                      value={voice}
+                      onChange={(e) => persistVoice(e.target.value)}
+                      className="w-full rounded-md border border-border/60 bg-background px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    >
+                      {VOICE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label} — {option.description}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-muted-foreground">
+                      Changing voice re-synthesizes the current audio.
+                    </p>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </>
         ) : null}
