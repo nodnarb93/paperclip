@@ -118,6 +118,7 @@ Existing checkpoints:
 - **`pre-patch-7-tts-fixes`** → commit `4dd44a10`. State of `local-main` just before adding Patch 7 (TTS fixes: persistence bug, text normalization expansion, non-blocking floating widget, mobile responsive layout, auto-close on end). Patches 1–6 are applied; known issues from Patch 6 itself: voice/speed didn't persist across modals on same page, TTS mishandled file paths and em-dashes, modal blocked page interaction.
 - **`pre-patch-8-kokoro-newissue`** → commit `c5e230d1`. State of `local-main` just before adding Patch 8 (TTS engine swap to Kokoro-FastAPI, Whisper full large-v3, voice input on New Issue dialog). Patches 1–7 applied; known limitations: XTTS robotic cadence, Whisper turbo run-on sentences, voice input only in chat composer.
 - **`pre-patch-9-cache-pregen`** → commit `8e003ffc`. State of `local-main` just before adding Patch 9 (LRU audio cache + last-comment pre-gen + cache-size setting). Patches 1–8 (incl. 8.1 fetch fix and 8.2 native voices) applied and verified.
+- **`pre-patch-10-tts-polish-2`** → commit `e94768f1`. State of `local-main` just before adding Patch 10 (single-active-modal + visual cached indicator). Patches 1–9 applied; known issues: clicking a second speaker stacked modals and played audio over each other; no way to tell which comments had cached audio.
 
 ## Active patches
 
@@ -469,6 +470,43 @@ All edits tagged with `// PATCH(nodnarb93): tts-cache-pregen (Patch 9)` comments
 - Pre-gen useEffect in `IssueChatThread.tsx` is a single self-contained block tagged with `PATCH(nodnarb93): tts-cache-pregen`. If upstream restructures the messages array's plumbing, port the useEffect to use the new shape.
 - TtsPlayerModal's cache integration replaces an `audioApi.synthesize` call. If upstream adds their own TTS or modifies the modal, preserve the `ttsCache.fetch` + `ttsCache.pin` calls.
 - The `readPreferredVoice` migration table in `ttsCache.ts` duplicates the one in TtsPlayerModal. If you ever change voice migration logic, update both — or refactor into a single shared source.
+
+### Patch 10 — TTS UX polish 2: single-active-modal + cached indicator
+
+**Why it exists**: two real-world UX papercuts after Patch 9 testing:
+
+1. **Multiple TTS modals could be open at once**, with audio stacking — clicking a speaker icon while another was playing or paused stacked the new modal on top, and the audios would play simultaneously (or the new one would play over the paused one). No standard media app does this; every podcast/music app enforces "one at a time."
+2. **No visual feedback for what's cached.** With Patch 9's cache + pre-gen, you can't tell from the UI which comments have ready-to-play audio vs. which will need a fresh synthesis. Especially valuable for the pre-gen case (last comment) since "I want instant playback on the latest reply" is the highest-frequency click.
+
+**What it does**:
+
+- **Single-active TTS modal**: a module-level `Set<(open: boolean) => void>` in `TtsButton.tsx` registers every "I'm open" setter. When a button transitions to open, its useEffect iterates the registry and calls `setOpen(false)` on every OTHER registered setter, then adds itself. Cleanup on unmount/close removes from registry. Result: opening a new TTS forces all others to close. Audio from the closed one stops via TtsPlayerModal's existing unmount cleanup (pause + revoke blob URL + unpin cache).
+- **Cached visual indicator**: the speaker icon (`Volume2` from lucide) now renders in `text-emerald-500` when `ttsCache.hasReady(text, readPreferredVoice())` returns true. Subtle, non-noisy. Tooltip changes from "Read aloud" to "Read aloud (audio ready)" so the cue is keyboard/screenreader accessible too.
+- **Cache emits change events**: `ttsCache` now extends `EventTarget` and fires a single `"change"` event on any mutation (entry added, in-flight promise resolved, error eviction, LRU eviction). Each TtsButton subscribes via useEffect and re-checks its own `hasReady` on every event. Broad-cast (one event for all subscribers) instead of per-key for simplicity; with O(N) comments and O(K) cache mutations the total cost is O(N) per mutation, which is trivial for realistic thread sizes.
+- **New `hasReady()` method on the cache**: synchronous boolean check that returns true only when an entry has a *resolved* Blob (skips in-flight Promise entries — we only want to flag "instant playback ready," not "synthesis in progress").
+
+**Where**:
+
+- [ui/src/lib/ttsCache.ts](ui/src/lib/ttsCache.ts) — class now extends `EventTarget`. Added `emitChange()` private helper called on fetch resolution, fetch error eviction, and LRU eviction. New public `hasReady(text, voice)` method.
+- [ui/src/components/TtsButton.tsx](ui/src/components/TtsButton.tsx) — module-level `openSetters` registry. Two new useEffects in the component: one subscribes to cache events to maintain `isCached` state, the other registers this button's setOpen with the registry when open transitions to true and closes all others. Speaker icon gains a `text-emerald-500` class when cached. Tooltip text varies by state.
+
+All edits tagged with `// PATCH(nodnarb93): tts-polish-2 (Patch 10)` comments at insertion sites.
+
+**Commits**: `<TBD>` (filled in after the patch is committed).
+
+**Tradeoffs / decisions explicitly made**:
+
+1. **Module-level Set over React Context.** A context provider for "TTS modal registry" would be cleaner architecturally but would require wrapping every TtsButton parent in a provider. For a feature with N independent buttons that each manage their own modal state, a module-level singleton is simpler and equivalent in behavior. If we ever needed to scope multiple TTS contexts (e.g. preview window + main app), the refactor to context is straightforward.
+2. **Broadcast change events, not per-key.** Each cache mutation notifies ALL subscribers. For a thread with 100 comments, every cache mutation triggers 100 useEffect re-checks. Modern React handles this trivially (each is just one hash lookup); the alternative (a per-key event channel) adds complexity for negligible gain.
+3. **`hasReady` returns false for in-flight entries.** During the brief window where pre-gen is fetching but hasn't resolved, the speaker stays grey. When the promise resolves, the cache emits change → button re-renders → speaker flips green. Avoids "almost ready but not quite" ambiguity.
+4. **`emerald-500` not `green-500`.** Marginally less saturated; reads more "ready/healthy" and less "submit form." Personal aesthetic; trivial to change.
+5. **No animation on the green flip.** Considered a brief pulse/glow when the speaker first becomes cached, decided against — it'd be a distracting pop-in for the pre-gen case where the speaker goes green almost immediately on page load. Subtle is better here.
+
+**Conflict-resolution note for future upstream merges**:
+
+- The cache module is unique to this fork.
+- TtsButton.tsx is also unique to this fork (added in Patch 5). Future merges should preserve the new useEffects and the module-level registry.
+- If upstream ever ships their own TTS feature with similar visual cues, our `emerald-500` class might clash visually — easy to swap.
 
 **UX details**:
 

@@ -80,12 +80,22 @@ interface CacheEntry {
   pinCount: number;
 }
 
-class TtsCache {
+// PATCH(nodnarb93): tts-polish-2 (Patch 10) — cache extends EventTarget so
+// UI elements (like the per-comment speaker icon's "cached" indicator) can
+// subscribe to cache changes and re-render when entries are added or
+// removed. Emits a single "change" event on any cache mutation — broad
+// instead of per-key for simplicity; subscribers filter by their own key.
+class TtsCache extends EventTarget {
   private entries = new Map<string, CacheEntry>();
   private maxSize: number;
 
   constructor() {
+    super();
     this.maxSize = this.readStoredMaxSize();
+  }
+
+  private emitChange(): void {
+    this.dispatchEvent(new Event("change"));
   }
 
   private readStoredMaxSize(): number {
@@ -123,6 +133,17 @@ class TtsCache {
   }
 
   /**
+   * Sync check: is there a RESOLVED Blob in the cache for this (text, voice)?
+   * Used by UI elements (speaker icon) to display a "cached" visual state.
+   * Returns false for in-flight Promise entries — we only flag "ready to
+   * play instantly" as cached. PATCH(nodnarb93): tts-polish-2 (Patch 10).
+   */
+  hasReady(text: string, voice: string): boolean {
+    const entry = this.entries.get(buildKey(text, voice));
+    return entry !== undefined && entry.value instanceof Blob;
+  }
+
+  /**
    * Cache-aware fetch. If the entry exists (blob or in-flight promise),
    * returns it. Otherwise starts a real synthesize and stores the promise.
    * On the promise resolution, replaces the entry with the resolved blob.
@@ -144,12 +165,16 @@ class TtsCache {
           current.value = blob;
           current.lastAccess = Date.now();
         }
+        // PATCH(nodnarb93): tts-polish-2 (Patch 10) — notify subscribers so
+        // speaker icons whose entries just landed can flip to "cached" state.
+        this.emitChange();
         return blob;
       },
       (err) => {
         // Drop the failed entry so the next caller doesn't reuse a broken
         // promise. Rethrow so the caller's catch fires.
         this.entries.delete(key);
+        this.emitChange();
         throw err;
       },
     );
@@ -194,11 +219,14 @@ class TtsCache {
     const sorted = Array.from(this.entries.entries())
       .filter(([, e]) => e.pinCount === 0)
       .sort(([, a], [, b]) => a.lastAccess - b.lastAccess);
+    let evicted = false;
     while (this.entries.size > this.maxSize && sorted.length > 0) {
       const next = sorted.shift();
       if (!next) break;
       this.entries.delete(next[0]);
+      evicted = true;
     }
+    if (evicted) this.emitChange();
   }
 }
 
