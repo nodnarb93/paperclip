@@ -1,5 +1,5 @@
 {
-  "id": "/",
+  "id": "/?pwa=paperclip",
   "name": "Paperclip",
   "short_name": "Paperclip",
   "description": "AI-powered project management and agent coordination platform",
