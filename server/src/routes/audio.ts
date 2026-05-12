@@ -35,7 +35,17 @@ function stripMarkdown(input: string): string {
     // Links: [text](href) -> keep visible text only.
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
     // Heading markers (#, ##, ### etc.) at the start of a line.
-    .replace(/^#{1,6}\s+/gm, "")
+    // PATCH(nodnarb93): heading-pause (Patch 16) — strip the # but ALSO
+    // append a period to the heading if it doesn't already end in terminal
+    // punctuation. Without the period, TTS flows the heading directly into
+    // the next line ("Acceptance criteria intake accepted..."), with the
+    // period it gets a proper sentence-boundary pause ("Acceptance
+    // criteria. Intake accepted..."). Skip if heading already ends in
+    // `.`, `!`, `?`, `:`, or `;` so we don't double-stack punctuation.
+    .replace(/^#{1,6}[ \t]+([^\n]+?)[ \t]*$/gm, (_match, heading: string) => {
+      const trimmed = heading.trim();
+      return /[.!?:;]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+    })
     // Bold (**text** and __text__) -> keep inner text.
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .replace(/__([^_]+)__/g, "$1")
