@@ -242,13 +242,14 @@ export function audioRoutes(
       return;
     }
 
-    // Propagate client disconnects to the upstream TTS request so we don't
-    // keep generating audio for a modal that was closed.
-    const upstreamAbort = new AbortController();
-    res.on("close", () => {
-      if (!res.writableEnded) upstreamAbort.abort();
-    });
-
+    // PATCH(nodnarb93): tts-fixes (Patch 8.1) — removed the abort-on-close
+    // machinery from Patch 5. The `res.on("close")` listener + AbortSignal
+    // was firing spuriously during normal request lifecycle in some Express
+    // / Node 20 / undici combinations, causing the upstream fetch to throw
+    // "fetch failed" before it could reach Kokoro. The GPU-cycle savings
+    // (avoid TTS-after-modal-close) wasn't worth the bug surface. For a
+    // single-user deployment, Kokoro just completes the generation if you
+    // close the modal — costs a few seconds of GPU on rare close events.
     let upstream;
     try {
       upstream = await fetch(`${opts.ttsServiceUrl}/v1/audio/speech`, {
@@ -260,13 +261,13 @@ export function audioRoutes(
           voice,
           response_format: "mp3",
         }),
-        signal: upstreamAbort.signal,
       });
     } catch (err) {
-      if (upstreamAbort.signal.aborted) return; // client disconnected
+      const cause = (err as { cause?: { code?: string; message?: string } } | null)?.cause;
       res.status(502).json({
         error: "TTS service unreachable",
         details: err instanceof Error ? err.message : String(err),
+        cause: cause ? { code: cause.code, message: cause.message } : undefined,
       });
       return;
     }
