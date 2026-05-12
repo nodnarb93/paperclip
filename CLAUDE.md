@@ -120,6 +120,8 @@ Existing checkpoints:
 - **`pre-patch-9-cache-pregen`** → commit `8e003ffc`. State of `local-main` just before adding Patch 9 (LRU audio cache + last-comment pre-gen + cache-size setting). Patches 1–8 (incl. 8.1 fetch fix and 8.2 native voices) applied and verified.
 - **`pre-patch-10-tts-polish-2`** → commit `e94768f1`. State of `local-main` just before adding Patch 10 (single-active-modal + visual cached indicator). Patches 1–9 applied; known issues: clicking a second speaker stacked modals and played audio over each other; no way to tell which comments had cached audio.
 - **`pre-patch-11-whisper-punctuation`** → commit `ef883c62`. State of `local-main` just before adding Patch 11 (Whisper run-on sentence fix via VAD + initial_prompt). Patches 1–10 applied; known issue: Whisper large-v3 produces no-punctuation run-ons on longer dictations because it autoregressively gets stuck in "no-punctuation mode" on long unsegmented audio.
+- **`pre-patch-12-hyphen-tts`** → commit `85e7ddcb`. State of `local-main` just before adding Patch 12 (TTS hyphen-stripping in identifier-like tokens). Patches 1–11 applied; known issue: TTS reads `BIZ-117` as "B I Z minus one one seven" instead of "B I Z one one seven".
+- **`pre-patch-13-scroll-bottom`** → commit `0b1aa1fb`. State just before adding Patch 13 (auto-scroll to bottom on issue load + up arrow). Patches 1–12 applied; issue page opens at top, user manually clicks the down arrow every time.
 
 ## Active patches
 
@@ -549,6 +551,56 @@ Tagged with `// PATCH(nodnarb93): whisper-punctuation (Patch 11)`.
 
 - This patch only modifies the existing `transcribe` route handler in `server/src/routes/audio.ts`. The change is a small query-param expansion; if upstream restructures the route, preserve the four parameters: `vad_filter=true`, `language=en`, `initial_prompt=<the prompt>`, and the existing `encode/task/output`.
 - If upstream ever wraps the whisper-asr-webservice call themselves, check whether they handle VAD + prompts. If yes, switch to their handling and drop this patch.
+
+### Patch 12 — TTS hyphen-stripping in identifier-like tokens
+
+**Why it exists**: identifiers like `BIZ-117`, `JIRA-1234`, `CVE-2024-1234` were being spoken as "B I Z **minus** one one seven" — Kokoro pronounces the hyphen as "minus" because it looks like a math expression. Identifiers should sound like "B I Z one one seven" (prefix spelled letter-by-letter, suffix read naturally, no hyphen sound).
+
+**What it does**: a new regex in `normalizeForSpeech()` (the server-side TTS preprocessing function) matches uppercase-alphanumeric tokens connected by hyphens and replaces the hyphens with spaces.
+
+Pattern: `\b([A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+)\b`. Matches require:
+- First segment starts with an uppercase letter and is all-uppercase (or uppercase+digits)
+- One or more `-alphanumeric-segment` groups follow
+- Word boundaries at both ends
+
+Lowercase tokens like `self-driving` or mixed-case like `iOS-app` do NOT match — only obvious identifier shapes. Multi-segment IDs like `CVE-2024-1234` collapse all internal hyphens to spaces in one pass via the callback form of `String.replace`.
+
+**Where**: [server/src/routes/audio.ts](server/src/routes/audio.ts) — added inside `normalizeForSpeech()`, after the dash-to-pause rules and before the file-path normalization. Tagged with `PATCH(nodnarb93): hyphen-tts (Patch 12)`.
+
+**Commits**: `<TBD>`.
+
+**Tradeoffs / decisions**:
+
+1. **Uppercase-prefix only**. Won't fix lowercase issue keys (e.g. `proj-123`). Trade-off: catches the universal company-prefix pattern, avoids mangling normal compound words. If we ever need lowercase support, easy to widen the regex.
+2. **No special handling for negative numbers**. `-5` would still be read as "minus five" if it appears as a standalone token, which is actually correct.
+3. **Pattern matches the COMPANY prefix style** (`BIZ`, `JIRA`, `INC`, `ENG`, etc.) — agnostic to the actual prefix as the user requested.
+
+**Conflict-resolution**: pure regex addition in `normalizeForSpeech`. No upstream collision surface; the function itself is a fork-only addition from Patch 7.
+
+### Patch 13 — Auto-scroll to bottom on issue load + paired up-arrow
+
+**Why it exists**: every time you load an issue page, you have to manually click the existing down arrow to scroll to the most recent comments. Friction on a high-frequency action.
+
+**What it does**:
+
+1. **Auto-scroll on initial mount**: when `ScrollToBottom` mounts, a polling loop watches the scroll target's `scrollHeight`. Once height hasn't changed for ~300ms (3 polls × 100ms), the page is assumed to be done loading and the scroller is instant-jumped to bottom. "Instant" (not "smooth") to avoid the dizziness the user complained about — visually it feels like the page loaded at the bottom.
+2. **Bail-out on user interaction**: if the user touches the wheel, taps the screen, or presses a key before the auto-scroll fires, the auto-scroll is cancelled. Real input wins over default behavior. The check uses `wheel`/`touchstart`/`keydown` listeners with `once: true` — these only fire on genuine user input, not on our own programmatic `scrollTo` calls.
+3. **5-second safety timeout** in case content never settles (e.g., infinite-loading page). Bails out silently.
+4. **Up-arrow companion**: mirrors the down arrow. Visible when `distanceFromTop > 300`. Renders above the down arrow (`+3rem`) when both are shown so they don't overlap.
+5. **Explicit button clicks** still use smooth scroll (user-initiated, conventional).
+
+**Where**: [ui/src/components/ScrollToBottom.tsx](ui/src/components/ScrollToBottom.tsx) — extensive rewrite. The original component was ~85 lines; the new version is ~190 lines mostly due to the auto-scroll polling logic and the up-arrow branch. Tagged with `PATCH(nodnarb93): scroll-bottom (Patch 13)`.
+
+**Commits**: `<TBD>`.
+
+**Tradeoffs / decisions**:
+
+1. **Polling for height stability vs. listening for a "content loaded" event**. Polling is simpler and doesn't require plumbing through context from the messages-loading code. 100ms × 3 ticks (300ms total) feels snappy in practice. If content takes ages to load on a particular issue, the 5s safety timeout fires and the user just sees the page at the top — they can manually click the down arrow as before.
+2. **`behavior: "instant"` (not `"smooth"`) for auto-scroll**. Direct user request — smooth scroll on every page load is dizzying. The trade-off is that very fast loads may produce a visible "jump" from top to bottom, but in practice the polling delay means the user rarely sees the top first.
+3. **Wheel/touch/key for bail-out, not the `scroll` event**. The `scroll` event would fire from our own `scrollTo`, defeating the purpose. The chosen input events fire only on genuine user input.
+4. **Up arrow shown above the down arrow** (not on the opposite side of the screen). Keeps both controls within thumb reach on mobile. The `+3rem` offset is enough vertical space to avoid overlap.
+
+**Conflict-resolution**: file unique to this fork as of v2026.428.0 (verify on next upstream merge — if upstream adds their own scroll-to-bottom, port the auto-scroll + up-arrow features onto theirs).
 
 **UX details**:
 
