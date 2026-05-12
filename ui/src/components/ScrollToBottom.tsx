@@ -154,6 +154,63 @@ export function ScrollToBottom() {
     };
   }, []);
 
+  // PATCH(nodnarb93): sticky-scroll (Patch 15) — when content grows (new
+  // comment arrives, image loads, etc.) AND the user is at the bottom of
+  // the page, auto-scroll to the new bottom. If the user has manually
+  // scrolled up even slightly, sticky disengages and content can grow
+  // below the viewport until the user scrolls back down.
+  //
+  // Implementation: scroll listener maintains a "stuck" flag (true when
+  // within 50px of the bottom). MutationObserver on #main-content
+  // detects any DOM mutation in the scroll container; on each mutation,
+  // if stuck, we re-scroll to bottom. Defer the scroll to the next
+  // animation frame so the layout has a chance to settle first.
+  //
+  // The 50px threshold is generous enough to handle minor scroll-position
+  // rounding (e.g. when smooth-scroll finishes a few px short of the
+  // bottom) without re-engaging if the user has clearly scrolled up.
+  useEffect(() => {
+    let stuck = true;
+    const STICK_THRESHOLD_PX = 50;
+
+    const updateStuck = () => {
+      stuck = distanceFromBottom(resolveScrollTarget()) < STICK_THRESHOLD_PX;
+    };
+
+    const mainContent = document.getElementById("main-content");
+    const scrollListener = updateStuck;
+    const scrollHost = mainContent ?? window;
+    scrollHost.addEventListener("scroll", scrollListener, { passive: true });
+    // Initialize immediately so an early mutation doesn't see stale state.
+    updateStuck();
+
+    const onMutation = () => {
+      if (!stuck) return;
+      // Defer to next animation frame so the DOM-modifying React render has
+      // committed its layout before we measure scrollHeight.
+      requestAnimationFrame(() => {
+        // Re-check immediately before scrolling — the user may have scrolled
+        // up between the mutation and the next frame.
+        if (distanceFromBottom(resolveScrollTarget()) < STICK_THRESHOLD_PX * 2) {
+          scrollToBottom("instant");
+        }
+      });
+    };
+
+    const observerTarget = mainContent ?? document.body;
+    const mo = new MutationObserver(onMutation);
+    mo.observe(observerTarget, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+
+    return () => {
+      scrollHost.removeEventListener("scroll", scrollListener);
+      mo.disconnect();
+    };
+  }, []);
+
   // PATCH(nodnarb93): scroll-bottom (Patch 13) — explicit button clicks
   // use smooth scroll (user-initiated, conventional behavior). Only the
   // auto-scroll-on-mount uses instant.

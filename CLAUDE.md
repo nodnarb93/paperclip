@@ -122,6 +122,8 @@ Existing checkpoints:
 - **`pre-patch-11-whisper-punctuation`** → commit `ef883c62`. State of `local-main` just before adding Patch 11 (Whisper run-on sentence fix via VAD + initial_prompt). Patches 1–10 applied; known issue: Whisper large-v3 produces no-punctuation run-ons on longer dictations because it autoregressively gets stuck in "no-punctuation mode" on long unsegmented audio.
 - **`pre-patch-12-hyphen-tts`** → commit `85e7ddcb`. State of `local-main` just before adding Patch 12 (TTS hyphen-stripping in identifier-like tokens). Patches 1–11 applied; known issue: TTS reads `BIZ-117` as "B I Z minus one one seven" instead of "B I Z one one seven".
 - **`pre-patch-13-scroll-bottom`** → commit `0b1aa1fb`. State just before adding Patch 13 (auto-scroll to bottom on issue load + up arrow). Patches 1–12 applied; issue page opens at top, user manually clicks the down arrow every time.
+- **`pre-patch-14-voice-icon-bump`** → commit `1c6c7c7a`. State just before Patch 14 (default voice → am_echo + bigger comment speaker icons).
+- **`pre-patch-15-sticky-scroll`** → commit `3b396dcc`. State just before Patch 15 (sticky scrollbar that auto-follows new comments when user is at bottom).
 
 ## Active patches
 
