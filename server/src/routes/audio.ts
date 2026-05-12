@@ -69,6 +69,21 @@ function normalizeForSpeech(input: string): string {
     // prosodic pause reliably.
     .replace(/\s*[—–]\s*/g, ", ")
     .replace(/(\s)--(\s)/g, "$1, $2")
+    // ── IDENTIFIER HYPHENS (issue keys, CVEs, etc.) ──
+    // PATCH(nodnarb93): hyphen-tts (Patch 12). Patterns like BIZ-117,
+    // JIRA-1234, CVE-2024-1234 get read as "B I Z MINUS one one seven" by
+    // Kokoro because the hyphen is pronounced. Strip the hyphen so it reads
+    // as "B I Z one one seven" — TTS spells the uppercase prefix letter-by-
+    // letter and reads the numeric suffix naturally.
+    //
+    // Match: 2+ uppercase letters/digits, followed by one or more
+    // `-alphanumeric-segment` groups. Non-greedy on the prefix to avoid
+    // gobbling normal hyphenated compound words. Lowercase tokens like
+    // `self-driving` or `iOS-app` do NOT match (prefix must be all-caps).
+    .replace(
+      /\b([A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+)\b/g,
+      (match) => match.replace(/-/g, " "),
+    )
     // ── FILE PATHS / URLs → SEGMENT PAUSES ──
     // Match a multi-segment path like "qa/captures/foo-bar/baz.png" and
     // replace internal slashes with ", " so each segment is spoken with a
