@@ -2156,16 +2156,11 @@ export function Inbox() {
                       issue={issue}
                       issueLinkState={issueLinkState}
                       selected={selected}
-                      className={cn(
-                        // PATCH(nodnarb93): ui-polish (Patch 18) — subtle
-                        // row alternation in the inbox list. IssueRow renders
-                        // as a Link; nth-child(odd) targets it among its
-                        // siblings inside the listRef container above.
-                        "odd:bg-muted/20",
+                      className={
                         isArchiving
                           ? "pointer-events-none -translate-x-4 scale-[0.98] opacity-0 transition-all duration-200 ease-out"
-                          : "transition-all duration-200 ease-out",
-                      )}
+                          : "transition-all duration-200 ease-out"
+                      }
                       desktopMetaLeading={
                         <>
                           {nestingEnabled ? (
@@ -2302,7 +2297,20 @@ export function Inbox() {
                       <div
                         key={`sel-${key}`}
                         data-inbox-item
-                        className="relative"
+                        // PATCH(nodnarb93): ui-polish-fix (Patch 18.1) — every
+                        // odd row in the inbox list darkens via a partial
+                        // page-background tint. Using the loop's `index`
+                        // instead of CSS :nth-child(odd) because each item is
+                        // conditionally wrapped in <SwipeToArchive>, which
+                        // breaks the sibling relationship the :nth-child
+                        // selector relies on. bg-background/40 darkens the
+                        // bg-card container visibly (card is oklch 0.205,
+                        // background is 0.145 in dark mode; ~40% mix darkens
+                        // perceptibly without erasing the row contrast).
+                        className={cn(
+                          "relative",
+                          index % 2 === 1 && "bg-background/40",
+                        )}
                         onClick={() => setSelectedIndex(navIdx)}
                       >
                         {child}

@@ -7,13 +7,11 @@ interface SidebarSectionProps {
 
 export function SidebarSection({ label, children }: SidebarSectionProps) {
   return (
-    // PATCH(nodnarb93): ui-polish (Patch 18) — added a hairline top border +
-    // pt-3 so adjacent sections in the sidebar nav have a clear visual break
-    // instead of bleeding together over the same flat background. The parent
-    // `<nav>` has gap-4 between sections so the border sits inside the gap.
-    // `first:` modifier skips the border on the first section so it doesn't
-    // create a stray line under the top nav block.
-    <div className="pt-3 border-t border-sidebar-border/30 first:border-t-0 first:pt-0">
+    // NOTE: section-separator border styling was moved UP to the parent
+    // `<nav>` in Sidebar.tsx (Patch 18.1) so it also catches SidebarProjects
+    // and SidebarAgents — those don't go through SidebarSection but should
+    // get the same visual break. See Sidebar.tsx for the [&>*]: variants.
+    <div>
       <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-widest font-mono text-muted-foreground/60">
         {label}
       </div>

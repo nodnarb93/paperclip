@@ -69,7 +69,13 @@ export function Sidebar() {
         </Button>
       </div>
 
-      <nav className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide flex flex-col gap-4 px-3 py-2">
+      {/* PATCH(nodnarb93): ui-polish-fix (Patch 18.1) — section separator
+          styling moved here from SidebarSection. Every direct child except
+          the first gets a hairline top border + pt-3. Catches the assorted
+          section-like children (SidebarSection, SidebarProjects, SidebarAgents,
+          PluginSlotOutlet) with a single rule instead of each component
+          having to know about the separator. */}
+      <nav className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide flex flex-col gap-4 px-3 py-2 [&>*:not(:first-child)]:border-t [&>*:not(:first-child)]:border-sidebar-border/30 [&>*:not(:first-child)]:pt-3">
         <div className="flex flex-col gap-0.5">
           {/* New Issue button aligned with nav items */}
           <button
