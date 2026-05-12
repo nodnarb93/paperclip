@@ -1423,6 +1423,13 @@ export function IssuesList({
                   return (
                     <div
                       key={issue.id}
+                      // PATCH(nodnarb93): ui-polish (Patch 18) — subtle row
+                      // alternation. The wrapper div is what's the sibling of
+                      // other rows; bg here bleeds to fill the IssueRow's
+                      // Link inside. Faint enough (20% muted) to not fight
+                      // the hover state (accent/50) or the checklist
+                      // current-step highlight (primary/5).
+                      className="odd:bg-muted/20"
                       style={{
                         ...(depth > 0 ? { paddingLeft: `${depth * 16}px` } : {}),
                         ...(useDeferredRowRendering

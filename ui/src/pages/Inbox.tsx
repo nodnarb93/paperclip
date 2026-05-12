@@ -2156,11 +2156,16 @@ export function Inbox() {
                       issue={issue}
                       issueLinkState={issueLinkState}
                       selected={selected}
-                      className={
+                      className={cn(
+                        // PATCH(nodnarb93): ui-polish (Patch 18) — subtle
+                        // row alternation in the inbox list. IssueRow renders
+                        // as a Link; nth-child(odd) targets it among its
+                        // siblings inside the listRef container above.
+                        "odd:bg-muted/20",
                         isArchiving
                           ? "pointer-events-none -translate-x-4 scale-[0.98] opacity-0 transition-all duration-200 ease-out"
-                          : "transition-all duration-200 ease-out"
-                      }
+                          : "transition-all duration-200 ease-out",
+                      )}
                       desktopMetaLeading={
                         <>
                           {nestingEnabled ? (

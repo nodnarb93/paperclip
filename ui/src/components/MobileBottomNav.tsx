@@ -77,8 +77,11 @@ export function MobileBottomNav({ visible }: MobileBottomNavProps) {
                 onClick={item.onClick}
                 className={cn(
                   "relative flex min-w-0 flex-col items-center justify-center gap-1 rounded-md text-[10px] font-medium transition-colors",
+                  // PATCH(nodnarb93): ui-polish (Patch 18) — splash of color
+                  // for the active nav item. text-foreground was the same as
+                  // every other item, so the active state was invisible.
                   active
-                    ? "text-foreground"
+                    ? "text-blue-500 dark:text-blue-400"
                     : "text-muted-foreground hover:text-foreground",
                 )}
               >
@@ -97,8 +100,10 @@ export function MobileBottomNav({ visible }: MobileBottomNavProps) {
               className={({ isActive }) =>
                 cn(
                   "relative flex min-w-0 flex-col items-center justify-center gap-1 rounded-md text-[10px] font-medium transition-colors",
+                  // PATCH(nodnarb93): ui-polish (Patch 18) — see Create button
+                  // above for rationale on the blue accent.
                   isActive
-                    ? "text-foreground"
+                    ? "text-blue-500 dark:text-blue-400"
                     : "text-muted-foreground hover:text-foreground",
                 )
               }
