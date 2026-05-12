@@ -119,6 +119,7 @@ Existing checkpoints:
 - **`pre-patch-8-kokoro-newissue`** → commit `c5e230d1`. State of `local-main` just before adding Patch 8 (TTS engine swap to Kokoro-FastAPI, Whisper full large-v3, voice input on New Issue dialog). Patches 1–7 applied; known limitations: XTTS robotic cadence, Whisper turbo run-on sentences, voice input only in chat composer.
 - **`pre-patch-9-cache-pregen`** → commit `8e003ffc`. State of `local-main` just before adding Patch 9 (LRU audio cache + last-comment pre-gen + cache-size setting). Patches 1–8 (incl. 8.1 fetch fix and 8.2 native voices) applied and verified.
 - **`pre-patch-10-tts-polish-2`** → commit `e94768f1`. State of `local-main` just before adding Patch 10 (single-active-modal + visual cached indicator). Patches 1–9 applied; known issues: clicking a second speaker stacked modals and played audio over each other; no way to tell which comments had cached audio.
+- **`pre-patch-11-whisper-punctuation`** → commit `ef883c62`. State of `local-main` just before adding Patch 11 (Whisper run-on sentence fix via VAD + initial_prompt). Patches 1–10 applied; known issue: Whisper large-v3 produces no-punctuation run-ons on longer dictations because it autoregressively gets stuck in "no-punctuation mode" on long unsegmented audio.
 
 ## Active patches
 
@@ -507,6 +508,47 @@ All edits tagged with `// PATCH(nodnarb93): tts-polish-2 (Patch 10)` comments at
 - The cache module is unique to this fork.
 - TtsButton.tsx is also unique to this fork (added in Patch 5). Future merges should preserve the new useEffects and the module-level registry.
 - If upstream ever ships their own TTS feature with similar visual cues, our `emerald-500` class might clash visually — easy to swap.
+
+### Patch 11 — Whisper punctuation fix (VAD + initial_prompt)
+
+**Why it exists**: Whisper large-v3 (even with INT8 quantization, which only marginally affects WER) was producing **multi-paragraph run-on sentences with zero punctuation** on dictations longer than a single sentence. Short dictations got proper punctuation; long ones came back as solid walls of unbroken text. The user even tried being extremely deliberate with verbal pauses and enunciation as cues — the model still produced no punctuation marks.
+
+**Root cause**: Whisper is autoregressive. Once it processes enough audio without emitting punctuation, the model's next-token probability shifts toward continuing in "no-punctuation mode" — and that bias snowballs across the rest of the output. This is well-documented in [openai/whisper#194](https://github.com/openai/whisper/discussions/194) and [openai/whisper#1936](https://github.com/openai/whisper/discussions/1936). On long unsegmented audio it's almost certain to happen.
+
+**Fix**: change two Whisper request parameters in our `/api/audio/transcribe` route. Both are query params on the upstream `whisper-asr-webservice` call:
+
+1. **`vad_filter=true`** (was: default `false`). Enables Voice Activity Detection-based audio segmentation: Whisper processes the audio as multiple short chunks split at natural pauses, instead of one continuous stream. Each chunk gets fresh autoregressive context, so the "stuck in no-punctuation mode" bias can't propagate across chunk boundaries. Bonus: silence/noise gets trimmed, marginal WER improvement.
+2. **`initial_prompt`** = a short, varied-punctuation, conversational seed sentence. Whisper conditions its output style on the prompt. With VAD chunking, this prompt also re-seeds each chunk, reinforcing punctuated-style output throughout the entire transcription.
+3. **`language=en`** (was: auto-detect). Skips the per-request language detection step. Small reliability + WER win for an English-only user.
+
+**The chosen initial_prompt**:
+```
+"Okay, here is what I am thinking. First, let us walk through the issue carefully.
+Why is this happening? I think we should investigate. Does that make sense? Let me know."
+```
+
+Chosen for: ~30 words (enough to establish style without dominating short transcriptions), mix of declarative + interrogative sentences, varied punctuation (periods, commas, question marks), conversational tone matching how the user dictates issue descriptions, no specific domain terms that would leak into transcriptions.
+
+**Where**:
+
+- [server/src/routes/audio.ts](server/src/routes/audio.ts) — the `transcribe` route's call to `${whisperServiceUrl}/asr` now builds query params via `URLSearchParams` (cleaner than the prior hand-concatenated query string) and includes `vad_filter`, `initial_prompt`, and `language` alongside the existing `encode`, `task`, `output`.
+
+Tagged with `// PATCH(nodnarb93): whisper-punctuation (Patch 11)`.
+
+**Commits**: `<TBD>` (filled in after the patch is committed).
+
+**Tradeoffs / decisions explicitly made**:
+
+1. **Hardcoded prompt, not configurable.** Considered making `PAPERCLIP_WHISPER_INITIAL_PROMPT` an env var for per-user customization, but our deployment is single-user and the prompt is a conservative starter. Easy to make configurable later if needed.
+2. **`vad_filter=true` is the bigger fix.** The initial_prompt alone helps the start of the transcription but fades. VAD chunking is what actually prevents the no-punctuation mode from propagating. Doing both because they compound.
+3. **`vad_filter` may slightly increase latency** for very short clips (it has to run the Silero VAD model). For our typical dictation length (5–60 sec) the overhead is well under 100ms — negligible compared to model inference time.
+4. **Did NOT switch to a post-processing punctuation-restoration model** (e.g. `deepmultilingualpunctuation`). Adds another model dependency, another ~few seconds latency, and is overkill if VAD + prompt fix the root cause. Available as a fallback if VAD-only doesn't fully resolve it.
+5. **Did NOT pass `condition_on_previous_text`**. faster-whisper has this option but it's actually CONTRARY to what we want — passing previous-text context can REINFORCE the no-punctuation mode rather than break it. VAD chunking accomplishes what we want without this flag.
+
+**Conflict-resolution note for future upstream merges**:
+
+- This patch only modifies the existing `transcribe` route handler in `server/src/routes/audio.ts`. The change is a small query-param expansion; if upstream restructures the route, preserve the four parameters: `vad_filter=true`, `language=en`, `initial_prompt=<the prompt>`, and the existing `encode/task/output`.
+- If upstream ever wraps the whisper-asr-webservice call themselves, check whether they handle VAD + prompts. If yes, switch to their handling and drop this patch.
 
 **UX details**:
 

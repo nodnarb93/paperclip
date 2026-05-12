@@ -188,7 +188,31 @@ export function audioRoutes(
       file.originalname || "audio.webm",
     );
 
-    const whisperUrl = `${opts.whisperServiceUrl}/asr?encode=true&task=transcribe&output=json`;
+    // PATCH(nodnarb93): whisper-punctuation (Patch 11) — fix run-on-sentence
+    // output on longer dictations by enabling two settings:
+    //   - vad_filter=true: chunks audio at natural pauses (Voice Activity
+    //     Detection). Whisper gets fresh autoregressive context per chunk
+    //     instead of one continuous stream, which prevents the model from
+    //     "getting stuck in no-punctuation mode" on long inputs. Side
+    //     benefit: silence trimming improves perceived accuracy.
+    //   - initial_prompt: seeds Whisper with a well-punctuated example so
+    //     the model defaults toward the "punctuated style" mode. Effect
+    //     is strongest at the start; combined with VAD chunking each chunk
+    //     gets its own well-punctuated nudge.
+    //   - language=en: skip auto-detect (small WER + reliability win for
+    //     a single-language user).
+    const initialPrompt =
+      "Okay, here is what I am thinking. First, let us walk through the issue carefully. " +
+      "Why is this happening? I think we should investigate. Does that make sense? Let me know.";
+    const whisperParams = new URLSearchParams({
+      encode: "true",
+      task: "transcribe",
+      output: "json",
+      vad_filter: "true",
+      language: "en",
+      initial_prompt: initialPrompt,
+    });
+    const whisperUrl = `${opts.whisperServiceUrl}/asr?${whisperParams.toString()}`;
     let whisperResponse;
     try {
       whisperResponse = await fetch(whisperUrl, {
