@@ -125,6 +125,7 @@ Existing checkpoints:
 - **`pre-patch-14-voice-icon-bump`** → commit `1c6c7c7a`. State just before Patch 14 (default voice → am_echo + bigger comment speaker icons).
 - **`pre-patch-15-sticky-scroll`** → commit `3b396dcc`. State just before Patch 15 (sticky scrollbar that auto-follows new comments when user is at bottom).
 - **`pre-patch-16-heading-pause`** → commit `ed1f612f`. State just before Patch 16 (heading punctuation for TTS pauses).
+- **`pre-patch-17-tts-pauses`** → commit `5e756956`. State just before Patch 17 (comma after stripped identifier + period after bullet/numbered list items).
 
 ## Active patches
 

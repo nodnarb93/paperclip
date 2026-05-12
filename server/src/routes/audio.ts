@@ -53,10 +53,24 @@ function stripMarkdown(input: string): string {
     // (e.g. snake_case): require non-word boundaries around _ pairs.
     .replace(/\*([^*\n]+)\*/g, "$1")
     .replace(/(^|\W)_([^_\n]+)_(\W|$)/g, "$1$2$3")
+    // PATCH(nodnarb93): tts-pauses (Patch 17) — list items now strip the
+    // leading marker AND ensure the line ends in terminal punctuation.
+    // Without the period, list items flow into each other ("Buy milk eggs
+    // bread cheese") with no pause; with it, TTS gets a sentence boundary
+    // per item ("Buy milk. Eggs. Bread. Cheese."). Two periods is no worse
+    // than zero — they collapse to a single pause — so blanket-applying is
+    // safe. We skip lines that already end in `.!?:;` to avoid stacking.
+    //
     // Bullet list markers at line start.
-    .replace(/^[\s]*[-*+]\s+/gm, "")
-    // Numbered list markers at line start.
-    .replace(/^[\s]*\d+\.\s+/gm, "")
+    .replace(/^[ \t]*[-*+][ \t]+([^\n]+?)[ \t]*$/gm, (_match, content: string) => {
+      const trimmed = content.trim();
+      return /[.!?:;]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+    })
+    // Numbered list markers at line start (1. Foo, 2. Bar, 10. Baz).
+    .replace(/^[ \t]*\d+\.[ \t]+([^\n]+?)[ \t]*$/gm, (_match, content: string) => {
+      const trimmed = content.trim();
+      return /[.!?:;]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+    })
     // Blockquote markers.
     .replace(/^>\s*/gm, "")
     // Horizontal rules (---, ***, ___ on their own line).
@@ -86,13 +100,28 @@ function normalizeForSpeech(input: string): string {
     // as "B I Z one one seven" — TTS spells the uppercase prefix letter-by-
     // letter and reads the numeric suffix naturally.
     //
+    // PATCH(nodnarb93): tts-pauses (Patch 17) — also append a comma after
+    // the stripped identifier when the next char is non-punctuation, so the
+    // identifier doesn't flow directly into the next word. "BIZ 117 here"
+    // had no pause between "117" and "here"; "BIZ 117, here" gets a brief
+    // prosodic pause.
+    //
     // Match: 2+ uppercase letters/digits, followed by one or more
     // `-alphanumeric-segment` groups. Non-greedy on the prefix to avoid
     // gobbling normal hyphenated compound words. Lowercase tokens like
     // `self-driving` or `iOS-app` do NOT match (prefix must be all-caps).
     .replace(
       /\b([A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+)\b/g,
-      (match) => match.replace(/-/g, " "),
+      (match, _identifier: string, offset: number, fullString: string) => {
+        const stripped = match.replace(/-/g, " ");
+        const nextChar = fullString[offset + match.length];
+        // Skip the comma if already followed by terminal/separator punct,
+        // newline, or closing brackets/parens — those already provide pause.
+        if (nextChar && !/[,.!?:;\n)\]]/.test(nextChar)) {
+          return `${stripped},`;
+        }
+        return stripped;
+      },
     )
     // ── FILE PATHS / URLs → SEGMENT PAUSES ──
     // Match a multi-segment path like "qa/captures/foo-bar/baz.png" and
