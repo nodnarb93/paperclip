@@ -409,7 +409,7 @@ All edits in this repo are tagged with `// PATCH(nodnarb93): tts-fixes (Patch 7)
 
 All edits in this repo are tagged with `// PATCH(nodnarb93): voice-input-everywhere (Patch 8)` comments at insertion sites. Earlier patch comments preserved on the lines they originally touched.
 
-**Commits**: `25710202`.
+**Commits**: `25710202` (main patch — Kokoro service + Whisper large-v3 + voice extraction + New Issue mic). Follow-ups in the same logical patch: `4a6afecb` (8.1: remove abort-on-close machinery from synthesize route — it was firing spuriously in some Express/Node20/undici combinations, causing fetch to throw "fetch failed" before reaching Kokoro; also adds `err.cause` capture in the 502 path), `<TBD>` (8.2: voice picker switched from OpenAI-compat names like `fable` to Kokoro's native voice packs like `bm_fable`, `bm_george`, etc. — 15 curated English voices grouped by accent+gender via optgroups; legacy localStorage values get auto-migrated to native equivalents on read).
 
 **Tradeoffs / decisions explicitly made**:
 

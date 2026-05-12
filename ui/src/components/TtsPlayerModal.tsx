@@ -37,18 +37,55 @@ interface TtsPlayerProps {
 
 const STORAGE_KEY_VOICE = "paperclip.tts.voice";
 const STORAGE_KEY_SPEED = "paperclip.tts.speed";
-// PATCH(nodnarb93): tts-fixes (Patch 7) — Fable (British male) was the user's
-// preferred default; Alloy's high pitch was complained about.
-const DEFAULT_VOICE = "fable";
+// PATCH(nodnarb93): tts-kokoro-voices (Patch 8.2) — switched from OpenAI-compat
+// voice names (alloy/echo/fable/onyx/nova/shimmer) to Kokoro's native voice
+// packs. The compat names worked via Kokoro's mapping layer but routed
+// "fable" → "af_sarah" etc., giving worse results than the named voices
+// suggested. Native names give consistent, predictable output. Curated to ~15
+// English voices grouped by accent + gender. Kokoro ships ~67 total
+// (including non-English, ASMR, and v0 variants — those omitted here).
+const DEFAULT_VOICE = "bm_fable";
 const DEFAULT_SPEED = 1;
-const VOICE_OPTIONS: Array<{ value: string; label: string; description: string }> = [
-  { value: "alloy", label: "Alloy", description: "Neutral, balanced" },
-  { value: "echo", label: "Echo", description: "Mid-range male" },
-  { value: "fable", label: "Fable", description: "British male" },
-  { value: "onyx", label: "Onyx", description: "Deep male, news-anchor" },
-  { value: "nova", label: "Nova", description: "Warm female, podcast host" },
-  { value: "shimmer", label: "Shimmer", description: "Softer female" },
+interface VoiceOption {
+  value: string;
+  label: string;
+  description: string;
+  group: "British male" | "British female" | "American male" | "American female";
+}
+const VOICE_OPTIONS: VoiceOption[] = [
+  // British Male — closest to the "Fable" the user has been preferring.
+  { value: "bm_fable", label: "Fable", description: "British male", group: "British male" },
+  { value: "bm_george", label: "George", description: "BBC-narrator feel", group: "British male" },
+  { value: "bm_lewis", label: "Lewis", description: "Casual British male", group: "British male" },
+  { value: "bm_daniel", label: "Daniel", description: "Deeper British male", group: "British male" },
+  // British Female
+  { value: "bf_emma", label: "Emma", description: "Warm British female", group: "British female" },
+  { value: "bf_alice", label: "Alice", description: "British female", group: "British female" },
+  { value: "bf_lily", label: "Lily", description: "Younger British female", group: "British female" },
+  // American Male
+  { value: "am_michael", label: "Michael", description: "News-anchor feel", group: "American male" },
+  { value: "am_onyx", label: "Onyx", description: "Deep American male", group: "American male" },
+  { value: "am_adam", label: "Adam", description: "American male", group: "American male" },
+  { value: "am_echo", label: "Echo", description: "Mid-range American male", group: "American male" },
+  // American Female
+  { value: "af_sarah", label: "Sarah", description: "Neutral American female", group: "American female" },
+  { value: "af_nova", label: "Nova", description: "Podcast-host energy", group: "American female" },
+  { value: "af_bella", label: "Bella", description: "Warm American female", group: "American female" },
+  { value: "af_nicole", label: "Nicole", description: "Soft American female", group: "American female" },
+  { value: "af_sky", label: "Sky", description: "Bright American female", group: "American female" },
 ];
+// PATCH(nodnarb93): tts-kokoro-voices (Patch 8.2) — one-time migration for
+// users whose localStorage holds an old OpenAI-compat voice name from Patches
+// 6/7/8. Reads the legacy name, maps to the closest Kokoro native voice, and
+// writes it back so the next read returns the new value directly.
+const LEGACY_OPENAI_VOICE_MIGRATION: Record<string, string> = {
+  alloy: "af_nicole",   // Soft female, closest analogue to OpenAI's Alloy
+  echo: "am_echo",
+  fable: "bm_fable",
+  onyx: "am_onyx",
+  nova: "af_nova",
+  shimmer: "af_sky",    // No direct equivalent; Sky is the closest in tone
+};
 const SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 // PATCH(nodnarb93): tts-fixes (Patch 7) — auto-close delay after audio ends
 // naturally. 1.5s lets the user see the "ended" state before it disappears.
@@ -57,7 +94,19 @@ const AUTO_CLOSE_DELAY_MS = 1500;
 function readStoredVoice(): string {
   if (typeof window === "undefined") return DEFAULT_VOICE;
   const stored = window.localStorage.getItem(STORAGE_KEY_VOICE);
-  if (stored && VOICE_OPTIONS.some((v) => v.value === stored)) return stored;
+  if (!stored) return DEFAULT_VOICE;
+  // Current Kokoro-native voice already stored: use it.
+  if (VOICE_OPTIONS.some((v) => v.value === stored)) return stored;
+  // Patch 8.2 migration: legacy OpenAI-compat name → Kokoro-native.
+  const migrated = LEGACY_OPENAI_VOICE_MIGRATION[stored];
+  if (migrated) {
+    try {
+      window.localStorage.setItem(STORAGE_KEY_VOICE, migrated);
+    } catch {
+      // ignore — storage failure leaves the legacy value, will migrate next time
+    }
+    return migrated;
+  }
   return DEFAULT_VOICE;
 }
 
@@ -428,10 +477,16 @@ function TtsPlayer({ text, title, onClose }: TtsPlayerProps) {
                       onChange={(e) => persistVoice(e.target.value)}
                       className="w-full rounded-md border border-border/60 bg-background px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
                     >
-                      {VOICE_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label} — {option.description}
-                        </option>
+                      {/* PATCH(nodnarb93): tts-kokoro-voices (Patch 8.2) — grouped by
+                          accent + gender so 15+ options stay browseable. */}
+                      {(["British male", "British female", "American male", "American female"] as const).map((group) => (
+                        <optgroup key={group} label={group}>
+                          {VOICE_OPTIONS.filter((o) => o.group === group).map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label} — {option.description}
+                            </option>
+                          ))}
+                        </optgroup>
                       ))}
                     </select>
                     <p className="text-[11px] text-muted-foreground">
