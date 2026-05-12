@@ -409,7 +409,7 @@ All edits in this repo are tagged with `// PATCH(nodnarb93): tts-fixes (Patch 7)
 
 All edits in this repo are tagged with `// PATCH(nodnarb93): voice-input-everywhere (Patch 8)` comments at insertion sites. Earlier patch comments preserved on the lines they originally touched.
 
-**Commits**: `<TBD>` (filled in after the patch is committed).
+**Commits**: `25710202`.
 
 **Tradeoffs / decisions explicitly made**:
 
