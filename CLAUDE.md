@@ -129,6 +129,7 @@ Existing checkpoints:
 - **`pre-patch-18-ui-polish`** → commit `42e47d09`. State just before Patch 18 (radius fix, list alternation, sidebar section delineation, mobile nav active color).
 - **`pre-patch-19-manifest-id`** → commit `ab388d1e`. State just before Patch 19 (manifest `id: "/?pwa=paperclip"` for PWA identity uniqueness across multi-app tailnet hosts).
 - **`pre-patch-20-comments-width`** → commit `03c1efa9`. State just before Patch 20 (chat-message separators + wider issue-detail content).
+- **`pre-patch-21-manifest-path`** → commit `4442463d`. State just before Patch 21 (rename Paperclip manifest to /paperclip.webmanifest — Android Chrome WebAPK keys by normalized_manifest_url, not manifest id, so distinct path is the real requirement).
 
 ## Active patches
 

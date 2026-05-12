@@ -18,7 +18,12 @@
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
     <!-- PAPERCLIP_FAVICON_END -->
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-    <link rel="manifest" href="/site.webmanifest" />
+    <!-- PATCH(nodnarb93): manifest-path (Patch 21) - manifest moved from
+         /site.webmanifest to /paperclip.webmanifest so Android Chrome's
+         WebAPK service (which keys by normalized_manifest_url, NOT by the
+         manifest id field) treats Paperclip and any sibling PWA on the
+         same tailnet host as distinct installable apps. -->
+    <link rel="manifest" href="/paperclip.webmanifest" />
     <script>
       (() => {
         const key = "paperclip.theme";
