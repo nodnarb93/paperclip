@@ -116,6 +116,7 @@ Existing checkpoints:
 - **`pre-patch-5-tts-readaloud`** → commit `721b42e9`. State of `local-main` just before adding Patch 5 (read-aloud TTS via openedai-speech sidecar). Patches 1–4 are applied.
 - **`pre-patch-6-tts-polish`** → commit `54debd75`. State of `local-main` just before adding Patch 6 (TTS modal polish: hide title, settings panel with voice picker + speed pills, server-side markdown stripping). Patches 1–5 are applied and verified working.
 - **`pre-patch-7-tts-fixes`** → commit `4dd44a10`. State of `local-main` just before adding Patch 7 (TTS fixes: persistence bug, text normalization expansion, non-blocking floating widget, mobile responsive layout, auto-close on end). Patches 1–6 are applied; known issues from Patch 6 itself: voice/speed didn't persist across modals on same page, TTS mishandled file paths and em-dashes, modal blocked page interaction.
+- **`pre-patch-8-kokoro-newissue`** → commit `c5e230d1`. State of `local-main` just before adding Patch 8 (TTS engine swap to Kokoro-FastAPI, Whisper full large-v3, voice input on New Issue dialog). Patches 1–7 applied; known limitations: XTTS robotic cadence, Whisper turbo run-on sentences, voice input only in chat composer.
 
 ## Active patches
 
@@ -377,6 +378,53 @@ All edits in this repo are tagged with `// PATCH(nodnarb93): tts-fixes (Patch 7)
 - Patch 7 only modifies files modified or added by Patches 5/6. No upstream collision surface.
 - The radix Dialog replacement in `TtsPlayerModal.tsx` is structurally simple — a fixed-position div with Tailwind classes. If upstream ever adds a similar floating widget elsewhere, look at theirs for styling consistency.
 - `normalizeForSpeech()` is a pure function with no external dependencies. Easy to merge across upstream changes; just keep the function and call site intact.
+
+### Patch 8 — Kokoro TTS engine + Whisper large-v3 + voice input on New Issue
+
+**Why it exists**: three user-driven issues after Patch 7 testing:
+
+1. **TTS cadence was robotic** (XTTS via openedai-speech). Per January 2026 research, Kokoro-82M now sits at #1 on the TTS Arena leaderboard, beating XTTS despite being 6× smaller. Worth swapping.
+2. **Whisper transcripts had run-on sentences.** large-v3-turbo trades 32→4 decoder layers for 5× speed; the "minor quality degradation" the model card hints at shows up specifically in sentence segmentation and punctuation. Full large-v3 has the full decoder and produces better-segmented text. On a 4070 Ti Super (16 GB VRAM), the extra ~3 GB for the full model is trivial.
+3. **Voice input only worked in chat composer.** Should be available everywhere a markdown composer exists. First additional surface: the New Issue dialog.
+
+**What it does**:
+
+- **TTS engine swap**: `openedai-speech` (XTTS) replaced by `Kokoro-FastAPI` (Kokoro-82M). Same OpenAI-compatible API endpoint (`/v1/audio/speech`), so zero Paperclip code changes for the swap itself — only `PAPERCLIP_TTS_URL` changes (Kokoro listens on port `8880` instead of `8000`). Voice names (alloy/echo/fable/onyx/nova/shimmer) pass through Kokoro's OpenAI compat layer and route to its native voicepacks. Existing localStorage voice preferences continue to work.
+- **Whisper model**: `ASR_MODEL=large-v3` instead of `large-v3-turbo`. ~3 GB extra VRAM for noticeably better sentence segmentation/punctuation. faster_whisper's CTranslate2 still runs near-real-time on GPU.
+- **Voice-input extraction**: the inline voice-input logic in `IssueChatThread.tsx` (state, refs, `startVoiceRecording` / `stopVoiceRecording` / `toggleVoiceRecording` / `transcribeAndInsert` functions, MediaRecorder cleanup useEffect) was extracted into a reusable `useVoiceInput` hook. The mic/undo/spinner button cluster was extracted into a `VoiceInputControls` component. IssueChatThread now uses both with a 2-line integration. The shared logic is now ~150 lines instead of duplicated per consumer.
+- **Voice input added to New Issue dialog** via the new hook + component. Sits next to the existing Upload (paperclip) button in the metadata chip row. Description state is fed via the hook's `setDescription` binding; the dialog's existing keystroke-optimized `handleDescriptionChange` callback gets `voice.clearUndoOnEdit(next)` appended so the undo lifecycle works without forcing parent re-renders on every keystroke.
+
+**Where**:
+
+- **UI new files**:
+  - [ui/src/hooks/useVoiceInput.ts](ui/src/hooks/useVoiceInput.ts) — the extracted hook. Returns `{ isRecording, transcribing, showTranscribingSpinner, canUndo, toggleRecording, undo, onComposerChange, clearUndoOnEdit }`. `onComposerChange` is the all-in-one (calls setBody + clears undo); `clearUndoOnEdit` is the lightweight variant for consumers like NewIssueDialog that don't want parent setState on every keystroke.
+  - [ui/src/components/VoiceInputControls.tsx](ui/src/components/VoiceInputControls.tsx) — the reusable button cluster (mic toggle + undo + deferred spinner).
+- **UI modified**:
+  - [ui/src/components/IssueChatThread.tsx](ui/src/components/IssueChatThread.tsx) — removed ~150 lines of inline voice logic (state, refs, functions, useEffect), replaced with `const voice = useVoiceInput(setBody)` and `<VoiceInputControls voice={voice} />`. `MarkdownEditor`'s onChange now points at `voice.onComposerChange`. Behavior is functionally identical.
+  - [ui/src/components/NewIssueDialog.tsx](ui/src/components/NewIssueDialog.tsx) — added `const voice = useVoiceInput(setDescription)`, appended `voice.clearUndoOnEdit(nextDescription)` to the existing `handleDescriptionChange` callback, and dropped `<VoiceInputControls voice={voice} size="icon-xs" />` next to the Upload button in the chip row.
+- **Docker compose** (in `D:\Paperclip - Personal\Docker\docker-compose.yml`, not this repo):
+  - `tts:` service image changed from `ghcr.io/matatonic/openedai-speech:latest` to `ghcr.io/remsky/kokoro-fastapi-gpu:latest`. Volume mount path changed from `/app/voices` to `/app/api/src/models`.
+  - `paperclip-app-personal` env: `PAPERCLIP_TTS_URL` changed from `http://tts:8000` to `http://tts:8880`.
+  - `whisper` service env: `ASR_MODEL` changed from `large-v3-turbo` to `large-v3`.
+
+All edits in this repo are tagged with `// PATCH(nodnarb93): voice-input-everywhere (Patch 8)` comments at insertion sites. Earlier patch comments preserved on the lines they originally touched.
+
+**Commits**: `<TBD>` (filled in after the patch is committed).
+
+**Tradeoffs / decisions explicitly made**:
+
+1. **Kept the OpenAI-compatible voice names** rather than exposing Kokoro's native voicepack identifiers (`bm_fable`, `af_bella`, etc.). Reasons: (a) existing user localStorage values continue to work unchanged, (b) the OpenAI naming is more familiar to most users than Kokoro's accent_gender_name scheme, (c) Kokoro's compat layer makes this transparent. If we ever want more variety (Kokoro has ~30 voices to OpenAI's 6), we'd expand the picker list in a follow-up.
+2. **Hook owns two onChange variants** instead of one. NewIssueDialog needs the lightweight version because its parent state is intentionally NOT updated on every keystroke (perf optimization in the existing code). Giving the hook both variants is cleaner than forcing all consumers into the same pattern.
+3. **Did not rename `TtsPlayerModal` even though it's no longer a modal**. Minimizing churn — the rename is purely cosmetic.
+4. **Voice input on New Issue lives next to Upload**, not embedded in the description editor itself. Matches the chat composer pattern (mic next to paperclip-attach). Keeps the editor surface clean; concentrates "extra-text-input methods" in one row.
+5. **Whisper run-on improvements come from the model swap, not from post-processing.** Considered adding a punctuation-restoration pass server-side, but that's another model load and adds latency. Switching to large-v3 is a cleaner one-flag fix.
+
+**Conflict-resolution note for future upstream merges**:
+
+- The voice extraction touches files already heavily patched by us (IssueChatThread, NewIssueDialog). Future upstream merges should preserve `useVoiceInput` and `VoiceInputControls` invocations; the underlying functions live in new files unique to this fork.
+- If upstream restructures `IssueChatThread.tsx` substantially, the only voice-related touchpoints to preserve are: import of `useVoiceInput` + `VoiceInputControls`, the `const voice = useVoiceInput(setBody)` line, the `onChange={voice.onComposerChange}` on the MarkdownEditor, and the `<VoiceInputControls voice={voice} />` in the button row.
+- Same for NewIssueDialog: preserve the imports, the `useVoiceInput(setDescription)` call, the `voice.clearUndoOnEdit(nextDescription)` line inside `handleDescriptionChange`, and the `<VoiceInputControls voice={voice} size="icon-xs" />` in the button row.
+- Adding voice to more composers in the future: drop in `const voice = useVoiceInput(<setter>); <VoiceInputControls voice={voice} />` and wire `voice.onComposerChange` (or `voice.clearUndoOnEdit`) into the editor's change path.
 
 **UX details**:
 

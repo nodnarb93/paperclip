@@ -13,6 +13,9 @@ import { authApi } from "../api/auth";
 import { assetsApi } from "../api/assets";
 import { buildCompanyUserInlineOptions, buildMarkdownMentionOptions } from "../lib/company-members";
 import { queryKeys } from "../lib/queryKeys";
+// PATCH(nodnarb93): voice-input-everywhere (Patch 8) — voice input on New Issue.
+import { useVoiceInput } from "../hooks/useVoiceInput";
+import { VoiceInputControls } from "./VoiceInputControls";
 import { useProjectOrder } from "../hooks/useProjectOrder";
 import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "../lib/recent-assignees";
 import { getRecentProjectIds, trackRecentProject } from "../lib/recent-projects";
@@ -391,6 +394,11 @@ export function NewIssueDialog() {
   const { pushToast } = useToastActions();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  // PATCH(nodnarb93): voice-input-everywhere (Patch 8) — voice hook bound to
+  // setDescription. Voice insertions / undo update the parent description
+  // state directly; the IssueDescriptionEditor's value-syncing useEffect
+  // (line ~357) picks up the change and refreshes its internal draftValue.
+  const voice = useVoiceInput(setDescription);
   const titleRef = useRef("");
   const descriptionRef = useRef("");
   const [titleHasText, setTitleHasText] = useState(false);
@@ -648,7 +656,12 @@ export function NewIssueDialog() {
     const nextDraftHasText = titleRef.current.trim().length > 0 || nextDescription.trim().length > 0;
     setDraftHasText((current) => current === nextDraftHasText ? current : nextDraftHasText);
     queueDraftSave({ description: nextDescription });
-  }, [queueDraftSave]);
+    // PATCH(nodnarb93): voice-input-everywhere (Patch 8) — clear pending undo
+    // on manual edits. We use clearUndoOnEdit (not onComposerChange) because
+    // this component intentionally avoids parent setDescription on every
+    // keystroke; the description state syncs via different paths.
+    voice.clearUndoOnEdit(nextDescription);
+  }, [queueDraftSave, voice]);
 
   // Save draft on meaningful changes
   useEffect(() => {
@@ -1761,6 +1774,11 @@ export function NewIssueDialog() {
             <Paperclip className="h-3 w-3" />
             Upload
           </button>
+
+          {/* PATCH(nodnarb93): voice-input-everywhere (Patch 8) — voice
+              dictation for the description body. Same hook + component as
+              the chat composer; only the surface differs. */}
+          <VoiceInputControls voice={voice} size="icon-xs" />
 
           {/* More (dates) */}
           <Popover open={moreOpen} onOpenChange={setMoreOpen}>
