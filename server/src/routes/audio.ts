@@ -11,6 +11,10 @@ import { Router, type Request, type Response as ExpressResponse } from "express"
 import multer from "multer";
 import type { Db } from "@paperclipai/db";
 import { assertAuthenticated } from "./authz.js";
+import path from "node:path";
+import fs from "node:fs/promises";
+import { resolvePaperclipInstanceRoot } from "../home-paths.js";
+import { logger } from "../middleware/logger.js";
 
 const MAX_AUDIO_BYTES = 50 * 1024 * 1024;
 const MAX_TTS_TEXT_CHARS = 50000;
@@ -196,6 +200,131 @@ function stripMarkdownForTts(input: string): string {
   return normalizeForSpeech(stripMarkdown(input));
 }
 
+// PATCH(nodnarb93): whisper-vocab (Patch 24).
+// Loads a user-maintained vocabulary + voice-shortcut replacement list from
+// `${instanceRoot}/whisper-vocab.json`. The file is host-mounted at
+// `D:\Paperclip - Personal\Docker\instance\instances\default\whisper-vocab.json`
+// so the operator can edit it any time and changes take effect on the next
+// transcription (mtime cache below).
+//
+// File schema:
+//   {
+//     "vocabulary": ["Paperclip", "Brandon Keeber", ...],
+//     "replacements": [{"from": "hashtag", "to": "#"}, ...]
+//   }
+//
+// `vocabulary` entries get appended to the Whisper initial_prompt as a
+// natural-sounding sentence so the model is biased toward recognizing them.
+// `replacements` are applied post-transcription via case-insensitive
+// whole-word regex substitution.
+interface WhisperVocabConfig {
+  vocabulary: string[];
+  replacements: Array<{ from: string; to: string }>;
+}
+
+const WHISPER_VOCAB_EMPTY: WhisperVocabConfig = { vocabulary: [], replacements: [] };
+let _vocabCache: { mtimeMs: number; config: WhisperVocabConfig } | null = null;
+
+function whisperVocabPath(): string {
+  return path.join(resolvePaperclipInstanceRoot(), "whisper-vocab.json");
+}
+
+async function loadWhisperVocab(): Promise<WhisperVocabConfig> {
+  const filePath = whisperVocabPath();
+  let stat;
+  try {
+    stat = await fs.stat(filePath);
+  } catch (err) {
+    // File doesn't exist — that's fine, no vocab / no replacements.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      _vocabCache = null;
+      return WHISPER_VOCAB_EMPTY;
+    }
+    logger.warn({ err, filePath }, "whisper-vocab: stat failed");
+    return WHISPER_VOCAB_EMPTY;
+  }
+
+  if (_vocabCache && _vocabCache.mtimeMs === stat.mtimeMs) {
+    return _vocabCache.config;
+  }
+
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<WhisperVocabConfig>;
+    const vocabulary = Array.isArray(parsed.vocabulary)
+      ? parsed.vocabulary.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+      : [];
+    const replacements = Array.isArray(parsed.replacements)
+      ? parsed.replacements.filter(
+          (r): r is { from: string; to: string } =>
+            r != null
+            && typeof r === "object"
+            && typeof (r as { from?: unknown }).from === "string"
+            && (r as { from: string }).from.trim().length > 0
+            && typeof (r as { to?: unknown }).to === "string",
+        )
+      : [];
+    const config: WhisperVocabConfig = { vocabulary, replacements };
+    _vocabCache = { mtimeMs: stat.mtimeMs, config };
+    return config;
+  } catch (err) {
+    logger.warn({ err, filePath }, "whisper-vocab: parse failed; falling back to empty");
+    _vocabCache = { mtimeMs: stat.mtimeMs, config: WHISPER_VOCAB_EMPTY };
+    return WHISPER_VOCAB_EMPTY;
+  }
+}
+
+// Build the Whisper initial_prompt from the base style prompt + vocabulary.
+// Token budget is ~224 tokens for the initial_prompt; we cap at ~800 chars
+// (rough proxy) to leave headroom. If the vocab list would exceed that, the
+// oldest entries are dropped first.
+function buildWhisperInitialPrompt(vocabulary: string[]): string {
+  // PATCH(nodnarb93): contractions-prompt (Patch 24, bundled). Earlier
+  // versions of this prompt expanded every contraction ("here is" not
+  // "here's", "I am" not "I'm", "let us" not "let's"), which biased Whisper
+  // to expand contractions in the user's dictation too. Rewritten to model
+  // contracted forms while preserving the punctuation cues.
+  const baseStylePrompt =
+    "Okay, here's what I'm thinking. First, let's walk through this carefully. "
+    + "Why isn't this working? I think we should investigate. We can't tell yet. "
+    + "That doesn't seem right. Does that make sense? Let me know.";
+
+  if (vocabulary.length === 0) return baseStylePrompt;
+
+  const MAX_TOTAL_CHARS = 800;
+  const headroom = MAX_TOTAL_CHARS - baseStylePrompt.length - " Common terms include: .".length;
+  if (headroom <= 0) return baseStylePrompt;
+
+  const fitted: string[] = [];
+  let used = 0;
+  for (const term of vocabulary) {
+    const cost = (fitted.length === 0 ? 0 : ", ".length) + term.length;
+    if (used + cost > headroom) break;
+    fitted.push(term);
+    used += cost;
+  }
+  if (fitted.length === 0) return baseStylePrompt;
+  return `${baseStylePrompt} Common terms include: ${fitted.join(", ")}.`;
+}
+
+// Apply user-defined voice-shortcut replacements to a transcript. Each entry
+// matches case-insensitively on a whole-word boundary (so "hashtag" matches
+// the spoken word but not "hashtagging") and substitutes the replacement
+// verbatim.
+function applyWhisperReplacements(
+  transcript: string,
+  replacements: Array<{ from: string; to: string }>,
+): string {
+  if (replacements.length === 0) return transcript;
+  let result = transcript;
+  for (const { from, to } of replacements) {
+    const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`\\b${escaped}\\b`, "gi");
+    result = result.replace(pattern, to);
+  }
+  return result;
+}
+
 interface UploadedAudio {
   mimetype: string;
   buffer: Buffer;
@@ -270,9 +399,15 @@ export function audioRoutes(
     //     gets its own well-punctuated nudge.
     //   - language=en: skip auto-detect (small WER + reliability win for
     //     a single-language user).
-    const initialPrompt =
-      "Okay, here is what I am thinking. First, let us walk through the issue carefully. " +
-      "Why is this happening? I think we should investigate. Does that make sense? Let me know.";
+    //
+    // PATCH(nodnarb93): whisper-vocab (Patch 24) — augment the initial_prompt
+    // with operator-maintained vocabulary so Whisper is biased toward
+    // recognizing project-specific proper nouns ("Paperclip", "Kokoro", etc.)
+    // instead of acoustically-similar generic phrases ("pay per click"). The
+    // helper also rewrote the base style prompt to model contractions, since
+    // Whisper was previously biased to expand them in transcripts.
+    const vocabConfig = await loadWhisperVocab();
+    const initialPrompt = buildWhisperInitialPrompt(vocabConfig.vocabulary);
     const whisperParams = new URLSearchParams({
       encode: "true",
       task: "transcribe",
@@ -306,7 +441,13 @@ export function audioRoutes(
     }
 
     const result = (await whisperResponse.json()) as { text?: string; language?: string };
-    res.json({ transcript: (result.text ?? "").trim() });
+    // PATCH(nodnarb93): whisper-vocab (Patch 24) — voice-shortcut replacements.
+    // After Whisper returns the transcript, apply user-defined substitutions
+    // (e.g. spoken "hashtag" → literal "#") so the operator can dictate
+    // symbols without needing to insert them by hand later.
+    const rawTranscript = (result.text ?? "").trim();
+    const transcript = applyWhisperReplacements(rawTranscript, vocabConfig.replacements);
+    res.json({ transcript });
   });
 
   // PATCH(nodnarb93): tts-readaloud (Patch 5) — synthesize endpoint.
