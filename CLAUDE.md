@@ -130,6 +130,7 @@ Existing checkpoints:
 - **`pre-patch-19-manifest-id`** → commit `ab388d1e`. State just before Patch 19 (manifest `id: "/?pwa=paperclip"` for PWA identity uniqueness across multi-app tailnet hosts).
 - **`pre-patch-20-comments-width`** → commit `03c1efa9`. State just before Patch 20 (chat-message separators + wider issue-detail content).
 - **`pre-patch-21-manifest-path`** → commit `4442463d`. State just before Patch 21 (rename Paperclip manifest to /paperclip.webmanifest — Android Chrome WebAPK keys by normalized_manifest_url, not manifest id, so distinct path is the real requirement).
+- **`pre-patch-22-deferred-wake-promote`** → commit `01fd16d0`. State just before Patch 22. Symptom: agent reassigned via PATCH does not wake up; the new assignee's wakeup gets deferred behind a queued run from the prior assignee, and when that prior run is cancelled by the staleness check (`issue_assignee_changed`), the deferred wake is left orphaned indefinitely. Fix: `cancelQueuedRunForStaleIssue` in `server/src/services/heartbeat.ts` now calls `releaseIssueExecutionAndPromote(cancelled)` so deferred wakes for the same issue get promoted within the same transaction window. See the inline `PATCH(nodnarb93): deferred-wake promote on stale-queued cancel (Patch 22)` comment at the patch site for the full diagnosis (witnessed on BIZ-134 / issue id `3e70fdb2-6ed7-4450-a07c-035e5a300d07` on 2026-05-13).
 
 ## Active patches
 

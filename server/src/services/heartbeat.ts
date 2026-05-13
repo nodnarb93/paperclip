@@ -4092,6 +4092,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       payload: staleness.details,
     });
 
+    // PATCH(nodnarb93): deferred-wake promote on stale-queued cancel (Patch 22).
+    // When a queued run is cancelled here for staleness — most commonly
+    // `issue_assignee_changed` after a PATCH reassigned the issue out from
+    // under the queued run's agent — any wakeup that was DEFERRED behind this
+    // run's execution-path status (see `enqueueWakeup`'s active-execution-run
+    // gate) is left orphaned. The deferred-wake promotion loop lives in
+    // `releaseIssueExecutionAndPromote`, but the cancellation path above does
+    // not call it, so without this line the deferred wake sits in
+    // `agent_wakeup_requests` indefinitely until some unrelated run
+    // completion on the same issue happens to trigger promotion — by which
+    // time the world has moved on and the promoted run gets re-cancelled by
+    // the same staleness check. Witnessed on BIZ-134 (issue 3e70fdb2-...):
+    // CTO PATCHed to Beta Tester at 21:50:35, Beta Tester wake deferred,
+    // CTO's stale queued run cancelled at 21:50:41, Beta Tester wake sat for
+    // 2h17m, finally promoted at 00:08:06 only to be cancelled in the same
+    // second because by then the assignee had cycled away again.
+    //
+    // Calling `releaseIssueExecutionAndPromote` here is idempotent and cheap
+    // when there are no deferred wakes (just a SELECT scan); when there is
+    // one, the promotion happens inside the same transaction window where
+    // the issue's execution lock was already being torn down at lines
+    // 4071-4085 above, so the new owner wakes within seconds.
+    await releaseIssueExecutionAndPromote(cancelled);
+
     return cancelled;
   }
 
