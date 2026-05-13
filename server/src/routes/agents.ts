@@ -755,6 +755,44 @@ export function agentRoutes(
     await assertBoardCanManageAgentsForCompany(req, targetAgent.companyId);
   }
 
+  // PATCH(nodnarb93): agent-instruction-edit (Patch 25).
+  // Companion to assertCanManageInstructionsPath above, scoped narrower —
+  // gates only the *file write* operation (PUT /agents/:id/instructions-bundle/file)
+  // and allows board callers OR agent callers whose `permissions.canCreateAgents`
+  // is true. The rationale: an agent already authorized to create new agents
+  // can write that new agent's complete instruction bundle inline via
+  // `agent-hires`. Allowing the same agent to *edit* an existing agent's
+  // bundle files later (without re-creating the agent and losing its UUID
+  // and history) closes a real gap for meta-agents like the Recruiter.
+  //
+  // Deliberately NOT extended to the bundle-path / config / delete-file
+  // endpoints — those still go through assertCanManageInstructionsPath
+  // and remain board-only. Agents can edit content within an existing
+  // bundle; they cannot relocate it, restructure it, or remove files.
+  // Stat-check for "file must already exist" is deferred to the meta-agent's
+  // own instructions (HEARTBEAT.md rule); a future patch can lift it into
+  // server-side enforcement if that convention breaks down.
+  async function assertCanWriteInstructionsBundleFile(req: Request, targetAgent: { id: string; companyId: string }) {
+    assertCompanyAccess(req, targetAgent.companyId);
+    if (req.actor.type === "board") {
+      await assertBoardCanManageAgentsForCompany(req, targetAgent.companyId);
+      return;
+    }
+    if (req.actor.type === "agent" && req.actor.agentId) {
+      const actorAgent = await svc.getById(req.actor.agentId);
+      if (
+        actorAgent
+        && actorAgent.companyId === targetAgent.companyId
+        && canCreateAgents(actorAgent)
+      ) {
+        return;
+      }
+    }
+    throw forbidden(
+      "Only board-authenticated callers or agents with canCreateAgents permission can write instruction-bundle files",
+    );
+  }
+
   function assertNoAgentInstructionsConfigMutation(
     req: Request,
     adapterConfig: Record<string, unknown> | null | undefined,
@@ -1999,7 +2037,12 @@ export function agentRoutes(
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    await assertCanManageInstructionsPath(req, existing);
+    // PATCH(nodnarb93): agent-instruction-edit (Patch 25) — loosened from
+    // assertCanManageInstructionsPath to assertCanWriteInstructionsBundleFile
+    // so meta-agents with canCreateAgents (e.g. the Recruiter) can edit
+    // existing instruction files. All other endpoints in this section keep
+    // the board-only gate.
+    await assertCanWriteInstructionsBundleFile(req, existing);
 
     const actor = getActorInfo(req);
     const result = await instructions.writeFile(existing, req.body.path, req.body.content, {
