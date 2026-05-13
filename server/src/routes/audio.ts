@@ -123,6 +123,21 @@ function normalizeForSpeech(input: string): string {
         return stripped;
       },
     )
+    // ── LETTER+DIGIT ADJACENCY → SPACED ──
+    // PATCH(nodnarb93): tts-letter-digit-space (Patch 23). Kokoro's tokenizer
+    // treats a letter glued to a digit (e.g. "V1", "V2", "GPT4") as one
+    // syllable and produces weird readings like "vone" / "vtwo". Inserting a
+    // space lets the engine read the letter and digit run as separate tokens
+    // ("V" pronounced as "vee", then "1" pronounced as "one"). Applied to any
+    // letter (case-insensitive) immediately followed by one or more digits.
+    //
+    // Intentionally NOT mirrored for digit+letter — ordinal suffixes ("2nd",
+    // "3rd"), time markers ("10am"), and resolution/format shorthand ("4K",
+    // "8K", "5G") all read better intact than broken with a space.
+    //
+    // BIZ-117-style identifiers are already handled by Patch 12 above
+    // (hyphen-stripped to "BIZ 117"), so no conflict.
+    .replace(/([A-Za-z])(\d)/g, "$1 $2")
     // ── FILE PATHS / URLs → SEGMENT PAUSES ──
     // Match a multi-segment path like "qa/captures/foo-bar/baz.png" and
     // replace internal slashes with ", " so each segment is spoken with a
