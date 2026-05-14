@@ -350,9 +350,46 @@ export async function createApp(
       // with a MIME-type error, and cache that broken response. Return 404
       // instead. The index.html response itself is no-cache so a subsequent
       // deploy's updated asset hashes are picked up on next load.
+      //
+      // PATCH(nodnarb93): spa-fallback-api-prefix-guard (Patch 26).
+      // Some API endpoints have top-level path segments that the SPA does
+      // NOT use as routes (e.g. /attachments/<id>/content, /audio/transcribe,
+      // /heartbeat-runs/<id>/log, /llms/<file>.txt). When an agent or
+      // external caller hits one of these WITHOUT the /api prefix — which is
+      // an easy mistake when assembling URLs from path fragments — the
+      // request used to fall into this SPA fallback and silently receive
+      // the HTML shell with HTTP 200. That HTML then poisons downstream
+      // processing: a base64-encoded "image fetch" returns HTML bytes,
+      // which then end up in a Claude session's tool_result history,
+      // which causes every subsequent resume to fail with
+      // `API Error: 400 Could not process image` (witnessed on BIZ-158
+      // 2026-05-13). Honest 404s here prevent the entire chain of failure.
+      //
+      // Pure denylist by intent: the SPA owns `/auth/...`, `/heartbeats`,
+      // `/cli-auth/...`, etc., so we cannot blindly 404 everything that
+      // looks API-shaped. These four prefixes are confirmed NOT to be SPA
+      // routes (see ui/src/Routes.tsx). Add more here as new API-only
+      // top-level paths are introduced. False negatives (an API prefix
+      // omitted from this list) just preserve the pre-patch behavior of
+      // serving SPA HTML; false positives would only matter if the SPA
+      // later claimed one of these prefixes as a real route.
+      const API_ONLY_PATH_PREFIXES = [
+        "/attachments/",
+        "/heartbeat-runs/",
+        "/audio/",
+        "/llms/",
+      ];
       app.get(/.*/, (req, res) => {
         if (req.path.startsWith("/assets/")) {
           res.status(404).end();
+          return;
+        }
+        if (API_ONLY_PATH_PREFIXES.some((prefix) => req.path.startsWith(prefix))) {
+          res.status(404).json({
+            error: "API route not found",
+            hint: "This path is API-only. Did you mean to call it with the /api prefix?",
+            requestedPath: req.path,
+          });
           return;
         }
         res

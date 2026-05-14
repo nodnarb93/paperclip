@@ -5775,7 +5775,34 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           legacySessionId: nextSessionState.legacySessionId,
         }, normalizedUsage);
         if (taskKey) {
-          if (adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId)) {
+          // PATCH(nodnarb93): drop-session-on-image-poison (Patch 26).
+          // When Claude's resumed conversation history contains a tool_result
+          // whose base64-encoded "image" is not actually image bytes (e.g. it
+          // is the HTML shell of an SPA fallback that the agent fetched
+          // because it forgot the /api prefix — see the matching SPA-fallback
+          // guard in app.ts), Anthropic rejects every subsequent resume with
+          // `API Error: 400 Could not process image`. The persisted session
+          // id is now a dead-end and every retry inherits the same poisoned
+          // history. Drop the saved session id so the next wake starts a
+          // fresh conversation. The agent's task-level memory survives in
+          // the issue's comments and runtime state — only the in-memory
+          // Claude conversation history is reset. Witnessed on BIZ-158
+          // (issue cdbab8f0-3162-47e5-8c86-5cc0f5d8d508) 2026-05-13.
+          const isPoisonedImageError =
+            outcome !== "succeeded"
+            && typeof adapterResult.errorMessage === "string"
+            && /could not process image/i.test(adapterResult.errorMessage);
+          if (
+            adapterResult.clearSession
+            || isPoisonedImageError
+            || (!nextSessionState.params && !nextSessionState.displayId)
+          ) {
+            if (isPoisonedImageError) {
+              logger.warn(
+                { runId: finalizedRun.id, agentId: agent.id, taskKey, errorMessage: adapterResult.errorMessage },
+                "Dropping saved Claude session id due to image-processing failure; next wake will start fresh",
+              );
+            }
             await clearTaskSessions(agent.companyId, agent.id, {
               taskKey,
               adapterType: agent.adapterType,
