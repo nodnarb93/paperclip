@@ -621,6 +621,45 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return row ?? null;
   }
 
+  // PATCH(nodnarb93): stale-run-evaluation loop guard (Patch 27) — see createOrUpdateStaleRunEvaluation
+  async function findMostRecentClosedStaleRunEvaluation(companyId: string, runId: string) {
+    const [row] = await db
+      .select({
+        id: issues.id,
+        identifier: issues.identifier,
+        status: issues.status,
+        updatedAt: issues.updatedAt,
+      })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          eq(issues.originKind, STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND),
+          eq(issues.originId, runId),
+          isNull(issues.hiddenAt),
+          inArray(issues.status, ["done", "cancelled"]),
+        ),
+      )
+      .orderBy(desc(issues.updatedAt))
+      .limit(1);
+    return row ?? null;
+  }
+
+  // PATCH(nodnarb93): stale-run-evaluation loop guard (Patch 27) — see createOrUpdateStaleRunEvaluation
+  async function hasAnyWatchdogDecision(companyId: string, runId: string) {
+    const [row] = await db
+      .select({ id: heartbeatRunWatchdogDecisions.id })
+      .from(heartbeatRunWatchdogDecisions)
+      .where(
+        and(
+          eq(heartbeatRunWatchdogDecisions.companyId, companyId),
+          eq(heartbeatRunWatchdogDecisions.runId, runId),
+        ),
+      )
+      .limit(1);
+    return Boolean(row);
+  }
+
   async function buildRunOutputSilence(
     run: Pick<
       typeof heartbeatRuns.$inferSelect,
@@ -963,6 +1002,33 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         });
       }
       return { kind: "existing" as const, evaluationIssueId: existing.id };
+    }
+
+    // PATCH(nodnarb93): stale-run-evaluation loop guard (Patch 27)
+    // Loop guard: if a prior evaluation for this run was already reviewed and
+    // closed (done/cancelled) via the standard issue API — without going through
+    // recordWatchdogDecision — and the run hasn't produced any new output since
+    // that closure, treat the closure as a permanent dismiss. Without this gate
+    // the partial unique index (which excludes done/cancelled rows) lets the
+    // scheduler re-create a fresh evaluation every tick for runs that are still
+    // marked `running` in the DB but have actually been silent for hours —
+    // resulting in unbounded issue creation and runaway agent invocations.
+    //
+    // If any watchdog decision exists for this run, trust the snooze/rearm
+    // mechanism instead: continue/snooze decisions already gate the scan via
+    // latestActiveOutputQuietUntilDecision, and an explicit rearm should be
+    // honored even after the evaluation is closed.
+    const lastClosed = await findMostRecentClosedStaleRunEvaluation(input.run.companyId, input.run.id);
+    if (lastClosed) {
+      const lastOutputAt = input.run.lastOutputAt;
+      const noOutputSinceClose =
+        !lastOutputAt || lastOutputAt.getTime() <= lastClosed.updatedAt.getTime();
+      if (noOutputSinceClose) {
+        const hasDecision = await hasAnyWatchdogDecision(input.run.companyId, input.run.id);
+        if (!hasDecision) {
+          return { kind: "skipped" as const };
+        }
+      }
     }
 
     const ownerAgentId = await resolveStaleRunOwnerAgentId({ run: input.run, runningAgent, sourceIssue });

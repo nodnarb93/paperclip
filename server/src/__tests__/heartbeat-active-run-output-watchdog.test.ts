@@ -405,6 +405,61 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     expect(evaluations.filter((issue) => !["done", "cancelled"].includes(issue.status))).toHaveLength(1);
   });
 
+  it("does not re-fire after a previous evaluation was closed without new output", async () => {
+    // Regression: a partial unique index on (company_id, origin_kind, origin_id)
+    // excludes done/cancelled rows, so once an agent or user closes the
+    // evaluation as a false positive, findOpenStaleRunEvaluation returns null
+    // and the next scheduler tick used to spawn another evaluation for the same
+    // dead-but-still-marked-running run. That looped every 2-3 minutes and
+    // burned the daily Claude allowance.
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const first = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    expect(first.created).toBe(1);
+    const firstEvaluationId = first.evaluationIssueIds[0];
+    expect(firstEvaluationId).toBeTruthy();
+
+    // Simulate the agent closing the evaluation via the standard issue API
+    // (a comment + status=done) without recording a watchdog decision.
+    const closedAt = new Date(now.getTime() + 2 * 60_000);
+    await db
+      .update(issues)
+      .set({ status: "done", updatedAt: closedAt })
+      .where(eq(issues.id, firstEvaluationId));
+
+    // Next scheduler tick: the run is still `running` with stale output, but
+    // the closed evaluation should be treated as a dismiss.
+    const afterClose = await heartbeat.scanSilentActiveRuns({
+      now: new Date(closedAt.getTime() + 30_000),
+      companyId,
+    });
+    expect(afterClose.created).toBe(0);
+    expect(afterClose.skipped).toBe(1);
+
+    const allAfterClose = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stale_active_run_evaluation")));
+    expect(allAfterClose).toHaveLength(1);
+
+    // If the run produces new output after the closure, the next stale silence
+    // window legitimately warrants a fresh evaluation.
+    const newOutputAt = new Date(closedAt.getTime() + 60_000);
+    const newSilenceNow = new Date(newOutputAt.getTime() + ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000);
+    await db
+      .update(heartbeatRuns)
+      .set({ lastOutputAt: newOutputAt, lastOutputSeq: 1, lastOutputStream: "stdout" })
+      .where(eq(heartbeatRuns.id, runId));
+    const afterResume = await heartbeat.scanSilentActiveRuns({ now: newSilenceNow, companyId });
+    expect(afterResume.created).toBe(1);
+    expect(afterResume.evaluationIssueIds[0]).not.toBe(firstEvaluationId);
+  });
+
   it("rejects agent watchdog decisions using issues not bound to the target run", async () => {
     const now = new Date("2026-04-22T20:00:00.000Z");
     const { companyId, managerId, coderId, runId, issuePrefix } = await seedRunningRun({
