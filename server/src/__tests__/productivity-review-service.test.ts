@@ -424,4 +424,45 @@ describeEmbeddedPostgres("productivity review service", () => {
     const [review] = await listProductivityReviews(seeded.companyId);
     expect(review?.requestDepth).toBe(MAX_ISSUE_REQUEST_DEPTH);
   });
+
+  // PATCH(nodnarb93): productivity-review kill switch (Patch 30)
+  it("short-circuits the entire reconciliation when the kill switch is disabled", async () => {
+    const now = new Date("2026-04-28T12:00:00.000Z");
+    const seeded = await seedAssignedIssue();
+    await insertRuns({
+      companyId: seeded.companyId,
+      agentId: seeded.coderId,
+      issueId: seeded.issueId,
+      count: DEFAULT_PRODUCTIVITY_REVIEW_NO_COMMENT_STREAK_RUNS,
+      now,
+    });
+
+    const disabledService = productivityReviewService(db, { enabled: false });
+    const result = await disabledService.reconcileProductivityReviews({
+      now,
+      companyId: seeded.companyId,
+    });
+
+    expect(result).toMatchObject({
+      scanned: 0,
+      created: 0,
+      updated: 0,
+      existing: 0,
+      snoozed: 0,
+      skipped: 0,
+      failed: 0,
+    });
+
+    // No review issues created, no refresh comments posted.
+    const reviews = await listProductivityReviews(seeded.companyId);
+    expect(reviews).toHaveLength(0);
+
+    // Re-enabling on a fresh service instance still works (default behavior preserved).
+    const enabledService = productivityReviewService(db);
+    const followUp = await enabledService.reconcileProductivityReviews({
+      now,
+      companyId: seeded.companyId,
+    });
+    expect(followUp.created).toBe(1);
+  });
 });

@@ -166,9 +166,18 @@ function formatTrigger(trigger: ProductivityReviewTrigger) {
   return "Long active duration";
 }
 
-export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: EnqueueWakeup }) {
+// PATCH(nodnarb93): productivity-review kill switch (Patch 30) — env-driven
+// disable for the whole reconciliation. Default behavior matches upstream
+// (enabled). When disabled, reconcileProductivityReviews returns a zeroed
+// result immediately so no review issues are created and no "evidence
+// refreshed" comments are appended.
+export function productivityReviewService(
+  db: Db,
+  deps?: { enqueueWakeup?: EnqueueWakeup; enabled?: boolean },
+) {
   const issuesSvc = issueService(db);
   const budgets = budgetService(db);
+  const productivityReviewEnabled = deps?.enabled !== false;
 
   async function getCompanyIssuePrefix(companyId: string) {
     return db
@@ -643,6 +652,20 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
     companyId?: string;
     thresholds?: Partial<ProductivityReviewThresholds>;
   }) {
+    // PATCH(nodnarb93): productivity-review kill switch (Patch 30)
+    if (!productivityReviewEnabled) {
+      return {
+        scanned: 0,
+        created: 0,
+        updated: 0,
+        existing: 0,
+        snoozed: 0,
+        skipped: 0,
+        failed: 0,
+        reviewIssueIds: [] as string[],
+        failedIssueIds: [] as string[],
+      };
+    }
     const now = opts?.now ?? new Date();
     const thresholds = buildThresholds(opts?.thresholds);
     const candidates = await db

@@ -2019,7 +2019,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     autoCancelSilentRunEnabled,
     autoCancelSilentRunAfterMs,
   });
-  const productivityReviews = productivityReviewService(db, { enqueueWakeup });
+  // PATCH(nodnarb93): productivity-review kill switch (Patch 30) — env-driven
+  // off-switch for the periodic productivity reconciliation. Defaults to upstream
+  // behavior (enabled); set PAPERCLIP_PRODUCTIVITY_REVIEW_ENABLED=false to disable.
+  const productivityReviewEnabled = process.env.PAPERCLIP_PRODUCTIVITY_REVIEW_ENABLED !== "false";
+  const productivityReviews = productivityReviewService(db, {
+    enqueueWakeup,
+    enabled: productivityReviewEnabled,
+  });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
 
   async function hasUnsafeTextProjectionDatabase() {
