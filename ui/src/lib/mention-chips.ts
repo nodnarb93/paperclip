@@ -36,8 +36,26 @@ export type ParsedMentionChip =
 
 const iconMaskCache = new Map<string, string>();
 
+// PATCH(nodnarb93): self-host issue URL rewriting (Patch 29) — mirror the
+// self-host exception added to parseIssuePathIdFromPath. Upstream #4558 rejects
+// all absolute URLs here as defense-in-depth; we keep that for genuine remote
+// URLs but allow self-host URLs through so the mention-chip rendering kicks in
+// for agent-written localhost links in comments.
+const PATCH_29_SELF_HOST_HOSTNAMES = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
+
+function isSelfHostHttpUrl(value: string): boolean {
+  if (!/^https?:\/\//i.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return PATCH_29_SELF_HOST_HOSTNAMES.has(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 export function parseMentionChipHref(href: string): ParsedMentionChip | null {
-  if (/^https?:\/\//i.test(href.trim())) {
+  const trimmed = href.trim();
+  if (/^https?:\/\//i.test(trimmed) && !isSelfHostHttpUrl(trimmed)) {
     return null;
   }
 

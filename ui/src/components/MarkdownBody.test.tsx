@@ -187,7 +187,7 @@ describe("MarkdownBody", () => {
     expect(html).not.toContain('aria-label="Issue PAP-1271: PAP-1271"');
   });
 
-  it("preserves absolute issue URLs as external links", () => {
+  it("preserves truly remote absolute issue URLs as external links", () => {
     const url = "http://remote.example.test:3103/PAPA/issues/PAPA-115#comment-850083f3-24de-43e7-a8cd-bc01f7cc9f0d";
     const html = renderMarkdown(`See ${url}.`, [
       { identifier: "PAPA-115", status: "blocked" },
@@ -198,6 +198,19 @@ describe("MarkdownBody", () => {
     expect(html).toContain("lucide-external-link");
     expect(html).not.toContain('href="/issues/PAPA-115"');
     expect(html).not.toContain("paperclip-markdown-issue-ref");
+  });
+
+  // PATCH(nodnarb93): self-host issue URL rewriting (Patch 29)
+  it("rewrites self-host absolute issue URLs (localhost) to internal links", () => {
+    const html = renderMarkdown("See http://localhost:3100/PAP/issues/PAP-1179.", [
+      { identifier: "PAP-1179", status: "blocked" },
+    ]);
+
+    // Rewritten to a relative href so the browser resolves against
+    // window.location.origin — works for tailnet, LAN, or localhost browsers.
+    expect(html).toContain('href="/issues/PAP-1179"');
+    // And it's no longer flagged as external — same tab navigation.
+    expect(html).not.toContain('target="_blank"');
   });
 
   it("linkifies plain internal issue paths in markdown text", () => {

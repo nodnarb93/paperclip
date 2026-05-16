@@ -9,13 +9,46 @@ const BARE_ISSUE_IDENTIFIER_RE = /^[A-Z][A-Z0-9]+-\d+$/i;
 const ISSUE_SCHEME_RE = /^issue:\/\/:?([^?#\s]+)(?:[?#].*)?$/i;
 const ISSUE_REFERENCE_TOKEN_RE = /issue:\/\/:?[^\s<>()]+|https?:\/\/[^\s<>()]+|\/(?:[^\s<>()/]+\/)*issues\/[A-Z][A-Z0-9]+-\d+(?=$|[\s<>)\],.;!?:])|\b[A-Z][A-Z0-9]+-\d+\b/gi;
 
+// PATCH(nodnarb93): self-host issue URL rewriting (Patch 29) — upstream #4558
+// (commit 8145141c) stopped rewriting absolute http(s) issue URLs to internal
+// routes so true remote references (e.g. prod from staging) preserve their
+// origin. But in single-instance setups that are reachable via multiple
+// origins (tailnet hostname + LAN IP + localhost), agents commonly embed
+// "http://localhost:3100/<prefix>/issues/<id>" URLs in comments (built from
+// PAPERCLIP_API_URL). Those then open in a new tab pointing at localhost
+// regardless of which origin the operator is currently browsing through.
+//
+// Treat absolute URLs whose hostname is a known self-host literal as internal,
+// stripping the origin so the rewritten link is relative and resolves to
+// whatever origin the operator's browser is currently on (tailnet, LAN, or
+// localhost). True remote URLs (any other hostname) keep upstream's behavior.
+const SELF_HOST_HOSTNAMES = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
+
+function selfHostIssuePathnameOrNull(absoluteUrl: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(absoluteUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  if (!SELF_HOST_HOSTNAMES.has(parsed.hostname.toLowerCase())) return null;
+  return parsed.pathname;
+}
+
 export function parseIssuePathIdFromPath(pathOrUrl: string | null | undefined): string | null {
   if (!pathOrUrl) return null;
   const pathname = pathOrUrl.trim();
   if (!pathname) return null;
-  if (/^https?:\/\//i.test(pathname)) return null;
 
-  const segments = pathname.split("/").filter(Boolean);
+  let pathToParse = pathname;
+  if (/^https?:\/\//i.test(pathname)) {
+    const selfHostPath = selfHostIssuePathnameOrNull(pathname);
+    if (!selfHostPath) return null;
+    pathToParse = selfHostPath;
+  }
+
+  const segments = pathToParse.split("/").filter(Boolean);
   const issueIndex = segments.findIndex((segment) => segment === "issues");
   if (issueIndex === -1 || issueIndex === segments.length - 1) return null;
   const issuePathId = decodeURIComponent(segments[issueIndex + 1] ?? "");
