@@ -12,6 +12,7 @@ import {
   agentWakeupRequests,
   approvals,
   companies,
+  companyMemberships,
   heartbeatRunEvents,
   heartbeatRunWatchdogDecisions,
   heartbeatRuns,
@@ -287,12 +288,39 @@ function buildLivenessOriginalIssueComment(finding: IssueLivenessFinding, escala
   ].join("\n");
 }
 
-export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup }) {
+// PATCH(nodnarb93): silent-run auto-cancel (Patch 28) — see scanSilentActiveRuns / autoCancelSilentRun
+export const DEFAULT_SILENT_RUN_AUTO_CANCEL_AFTER_MS = 30 * 60 * 1000;
+export const MIN_SILENT_RUN_AUTO_CANCEL_AFTER_MS = 60 * 1000;
+
+type CancelRunFn = (runId: string, reason?: string) => Promise<typeof heartbeatRuns.$inferSelect | null>;
+
+export function recoveryService(
+  db: Db,
+  deps: {
+    enqueueWakeup: RecoveryWakeup;
+    // PATCH(nodnarb93): silent-run auto-cancel (Patch 28) — when these are provided the watchdog
+    // auto-cancels silent runs + posts a comment + reassigns the issue, replacing the
+    // legacy "create evaluation issue" flow. Omit `cancelRun` (or set autoCancelSilentRunEnabled
+    // to false) to keep the legacy behavior.
+    cancelRun?: CancelRunFn;
+    autoCancelSilentRunEnabled?: boolean;
+    autoCancelSilentRunAfterMs?: number;
+  },
+) {
   const issuesSvc = issueService(db);
   const treeControlSvc = issueTreeControlService(db);
   const budgets = budgetService(db);
   const instanceSettings = instanceSettingsService(db);
   const runLogStore = getRunLogStore();
+
+  // PATCH(nodnarb93): silent-run auto-cancel (Patch 28) — auto-cancel path is enabled
+  // when both a cancelRun dep is provided AND the enabled flag isn't explicitly false.
+  // The threshold can be tuned per call site (heartbeatService reads env at boot).
+  const autoCancelSilentRunEnabled = Boolean(deps.cancelRun) && deps.autoCancelSilentRunEnabled !== false;
+  const autoCancelSilentRunAfterMs = Math.max(
+    MIN_SILENT_RUN_AUTO_CANCEL_AFTER_MS,
+    deps.autoCancelSilentRunAfterMs ?? DEFAULT_SILENT_RUN_AUTO_CANCEL_AFTER_MS,
+  );
 
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -645,6 +673,26 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return row ?? null;
   }
 
+  // PATCH(nodnarb93): silent-run auto-cancel (Patch 28) — escalation target for the
+  // CTO's "I can't fix this" path and the loop-prevention fallback. Returns the
+  // oldest active board user on the company so a single-user instance gets the
+  // sole human; multi-user instances get a deterministic primary.
+  async function findEscalationUserId(companyId: string): Promise<string | null> {
+    const [row] = await db
+      .select({ principalId: companyMemberships.principalId })
+      .from(companyMemberships)
+      .where(
+        and(
+          eq(companyMemberships.companyId, companyId),
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.status, "active"),
+        ),
+      )
+      .orderBy(asc(companyMemberships.createdAt))
+      .limit(1);
+    return row?.principalId ?? null;
+  }
+
   // PATCH(nodnarb93): stale-run-evaluation loop guard (Patch 27) — see createOrUpdateStaleRunEvaluation
   async function hasAnyWatchdogDecision(companyId: string, runId: string) {
     const [row] = await db
@@ -958,6 +1006,208 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return true;
   }
 
+  // PATCH(nodnarb93): silent-run auto-cancel (Patch 28)
+  function buildAutoCancelComment(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    runningAgent: typeof agents.$inferSelect;
+    evidence: {
+      silenceAgeMs: number | null;
+      safeTail: string;
+    };
+    thresholdMs: number;
+    reassignTarget:
+      | { kind: "agent"; agentName: string }
+      | { kind: "user"; reason: "loop_guard" | "no_recovery_owner" };
+    escalationUserId: string | null;
+    now: Date;
+  }): string {
+    const silenceLabel = formatDuration(input.evidence.silenceAgeMs);
+    const thresholdLabel = formatDuration(input.thresholdMs);
+    const userMention = input.escalationUserId
+      ? `the board user (id \`${input.escalationUserId}\`)`
+      : "the board user";
+
+    const header = [
+      "**Paperclip auto-cancelled this issue's active run after prolonged output silence.**",
+      "",
+      `- Cancelled run: \`${input.run.id}\``,
+      `- Was assigned to: ${input.runningAgent.name} (${input.runningAgent.adapterType})`,
+      `- Run started: ${input.run.startedAt?.toISOString() ?? "unknown"}`,
+      `- Last output: ${input.run.lastOutputAt?.toISOString() ?? "none recorded"} *(silent for ${silenceLabel}; threshold ${thresholdLabel})*`,
+      "",
+      "**Last output excerpt:**",
+      "",
+      input.evidence.safeTail
+        ? "```text\n" + input.evidence.safeTail + "\n```"
+        : "_No run-log tail was available._",
+      "",
+      "---",
+      "",
+    ].join("\n");
+
+    if (input.reassignTarget.kind === "user") {
+      const reasonLine =
+        input.reassignTarget.reason === "loop_guard"
+          ? "The recovery-owner agent for this run was itself the silent agent, so this issue is being escalated directly to you to avoid a reassignment loop."
+          : "No eligible recovery-owner agent could be resolved for this run, so this issue is being escalated directly to you.";
+      return [
+        header,
+        `**Escalating this issue to ${userMention} for review.**`,
+        "",
+        reasonLine,
+        "",
+        "Status has been set to `blocked`. Once you've reviewed the evidence above, reassign to whichever agent should take it from here (or close the issue if it's no longer needed).",
+      ].join("\n");
+    }
+
+    return [
+      header,
+      `**Reassigning this issue to ${input.reassignTarget.agentName} to determine next steps.**`,
+      "",
+      "Review the evidence above and choose ONE of the following:",
+      "",
+      `1. **Try again with the original agent.** Set this issue's \`assigneeAgentId\` back to ${input.runningAgent.name}. A fresh run will start. Use this if the silence looks transient (model timeout, network hiccup, slow tool call) and a retry is likely to succeed.`,
+      "",
+      "2. **Try a different agent.** Set the assignee to a different engineer if the original agent has a known problem with this kind of task.",
+      "",
+      `3. **Escalate to the user.** If you suspect this will keep recurring — for example, this is one of multiple consecutive silent runs on this issue, or the task is blocked by something outside the system's reach — set \`assigneeAgentId = null\`, \`assigneeUserId = ${input.escalationUserId ?? "<board user id>"}\`, status = \`blocked\`, and leave a comment summarizing what you tried and your best hypothesis. The user will pick it up from there.`,
+      "",
+      "Do **not** mark this issue `done` unless the underlying work is actually complete.",
+    ].join("\n");
+  }
+
+  // PATCH(nodnarb93): silent-run auto-cancel (Patch 28) — replaces createOrUpdateStaleRunEvaluation
+  // when enabled. Cancels the silent run, posts an explanatory comment on the
+  // source issue (if any), and reassigns the issue to the recovery-owner agent.
+  // Loop guard: if recovery owner resolves to the silent run's own agent (or no
+  // recovery owner can be found), the issue is reassigned to the board user with
+  // status=blocked instead, so the discord notifier surfaces it.
+  async function autoCancelSilentRun(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    now: Date;
+  }): Promise<
+    | { kind: "cancelled"; reassignedTo: { kind: "agent"; agentId: string } | { kind: "user"; userId: string | null } }
+    | { kind: "skipped"; reason: "missing_agent" | "pause_held" | "cancel_failed" }
+  > {
+    if (!deps.cancelRun) return { kind: "skipped", reason: "cancel_failed" };
+
+    const runningAgent = await getAgent(input.run.agentId);
+    if (!runningAgent || runningAgent.companyId !== input.run.companyId) {
+      return { kind: "skipped", reason: "missing_agent" };
+    }
+
+    const sourceIssue = await resolveStaleRunSourceIssue(input.run);
+    if (sourceIssue && await isAutomaticRecoverySuppressedByPauseHold(db, sourceIssue.companyId, sourceIssue.id, treeControlSvc)) {
+      return { kind: "skipped", reason: "pause_held" };
+    }
+
+    const prefix = await getCompanyIssuePrefix(input.run.companyId);
+    const evidence = await collectStaleRunEvidence({
+      run: input.run,
+      runningAgent,
+      sourceIssue,
+      prefix,
+      now: input.now,
+    });
+
+    // Resolve the reassignment target. The recovery owner is the silent agent's
+    // reportsTo chain (or fallback CTO/CEO). If it resolves to the silent agent
+    // itself, that would be a no-op or a loop — escalate to the user instead.
+    const ownerAgentId = await resolveStaleRunOwnerAgentId({ run: input.run, runningAgent, sourceIssue });
+    const escalationUserId = await findEscalationUserId(input.run.companyId);
+    const ownerAgent =
+      ownerAgentId && ownerAgentId !== input.run.agentId ? await getAgent(ownerAgentId) : null;
+
+    const reassignTarget: Parameters<typeof buildAutoCancelComment>[0]["reassignTarget"] =
+      ownerAgent
+        ? { kind: "agent", agentName: ownerAgent.name }
+        : { kind: "user", reason: ownerAgentId === input.run.agentId ? "loop_guard" : "no_recovery_owner" };
+
+    // Cancel the run BEFORE mutating the issue, so the issue's
+    // execution_run_id is released and the reassignment-triggered wakeup
+    // starts a clean run instead of stacking behind a dead one.
+    let cancelled: typeof heartbeatRuns.$inferSelect | null;
+    try {
+      cancelled = await deps.cancelRun(input.run.id, "Auto-cancelled by silent-run watchdog");
+    } catch (err) {
+      logger.error({ err, runId: input.run.id }, "silent-run watchdog: failed to cancel run");
+      return { kind: "skipped", reason: "cancel_failed" };
+    }
+    if (!cancelled) {
+      logger.warn({ runId: input.run.id }, "silent-run watchdog: run was not in a cancellable state");
+      return { kind: "skipped", reason: "cancel_failed" };
+    }
+
+    const commentBody = buildAutoCancelComment({
+      run: input.run,
+      runningAgent,
+      evidence: { silenceAgeMs: evidence.silenceAgeMs, safeTail: evidence.safeTail },
+      thresholdMs: autoCancelSilentRunAfterMs,
+      reassignTarget,
+      escalationUserId,
+      now: input.now,
+    });
+
+    // Post the comment on the source issue if there is one. Runs without a
+    // source issue (one-off triggers, system tasks) just get a server log.
+    if (sourceIssue) {
+      try {
+        await issuesSvc.addComment(sourceIssue.id, commentBody, { runId: input.run.id });
+      } catch (err) {
+        logger.warn({ err, issueId: sourceIssue.id }, "silent-run watchdog: failed to post comment");
+      }
+
+      // Reassign / escalate the source issue.
+      const updates: Record<string, unknown> = {};
+      if (reassignTarget.kind === "agent") {
+        updates.assigneeAgentId = ownerAgentId;
+        updates.assigneeUserId = null;
+      } else {
+        updates.assigneeAgentId = null;
+        updates.assigneeUserId = escalationUserId;
+        if (sourceIssue.status !== "blocked") updates.status = "blocked";
+      }
+      try {
+        await issuesSvc.update(sourceIssue.id, updates);
+      } catch (err) {
+        logger.warn({ err, issueId: sourceIssue.id, updates }, "silent-run watchdog: failed to reassign issue");
+      }
+    } else {
+      logger.warn(
+        { runId: input.run.id, companyId: input.run.companyId },
+        "silent-run watchdog: cancelled run had no source issue; no comment/reassignment performed",
+      );
+    }
+
+    await logActivity(db, {
+      companyId: input.run.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: input.run.agentId,
+      runId: input.run.id,
+      action: "heartbeat.output_stale_auto_cancelled",
+      entityType: sourceIssue ? "issue" : "heartbeat_run",
+      entityId: sourceIssue?.id ?? input.run.id,
+      details: {
+        source: "recovery.scan_silent_active_runs",
+        thresholdMs: autoCancelSilentRunAfterMs,
+        silenceAgeMs: evidence.silenceAgeMs,
+        lastOutputAt: input.run.lastOutputAt?.toISOString() ?? null,
+        reassignTargetKind: reassignTarget.kind,
+        reassignedToAgentId: reassignTarget.kind === "agent" ? ownerAgentId : null,
+        reassignedToUserId: reassignTarget.kind === "user" ? escalationUserId : null,
+      },
+    });
+
+    return {
+      kind: "cancelled",
+      reassignedTo:
+        reassignTarget.kind === "agent"
+          ? { kind: "agent", agentId: ownerAgentId as string }
+          : { kind: "user", userId: escalationUserId },
+    };
+  }
+
   async function createOrUpdateStaleRunEvaluation(input: {
     run: typeof heartbeatRuns.$inferSelect;
     now: Date;
@@ -1116,7 +1366,14 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
   async function scanSilentActiveRuns(opts?: { now?: Date; companyId?: string }) {
     const now = opts?.now ?? new Date();
-    const suspicionBefore = new Date(now.getTime() - ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS);
+    // PATCH(nodnarb93): silent-run auto-cancel (Patch 28) — when enabled, the
+    // scan filter uses the (typically shorter) auto-cancel threshold; the legacy
+    // 1h suspicious threshold is bypassed. When disabled, the legacy 1h filter
+    // remains so existing tests and call sites continue to work.
+    const thresholdMs = autoCancelSilentRunEnabled
+      ? autoCancelSilentRunAfterMs
+      : ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS;
+    const silenceBefore = new Date(now.getTime() - thresholdMs);
     const candidates = await db
       .select()
       .from(heartbeatRuns)
@@ -1124,7 +1381,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         and(
           opts?.companyId ? eq(heartbeatRuns.companyId, opts.companyId) : undefined,
           eq(heartbeatRuns.status, "running"),
-          sql`coalesce(${heartbeatRuns.lastOutputAt}, ${heartbeatRuns.processStartedAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) <= ${suspicionBefore.toISOString()}::timestamptz`,
+          sql`coalesce(${heartbeatRuns.lastOutputAt}, ${heartbeatRuns.processStartedAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) <= ${silenceBefore.toISOString()}::timestamptz`,
         ),
       )
       .orderBy(asc(heartbeatRuns.createdAt))
@@ -1137,6 +1394,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       escalated: 0,
       snoozed: 0,
       skipped: 0,
+      // PATCH(nodnarb93): silent-run auto-cancel (Patch 28)
+      autoCancelled: 0,
+      cancelledRunIds: [] as string[],
       evaluationIssueIds: [] as string[],
     };
 
@@ -1145,6 +1405,20 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         result.snoozed += 1;
         continue;
       }
+
+      // PATCH(nodnarb93): silent-run auto-cancel (Patch 28) — new default path
+      if (autoCancelSilentRunEnabled) {
+        const outcome = await autoCancelSilentRun({ run, now });
+        if (outcome.kind === "cancelled") {
+          result.autoCancelled += 1;
+          result.cancelledRunIds.push(run.id);
+        } else {
+          result.skipped += 1;
+        }
+        continue;
+      }
+
+      // Legacy path: create / update an evaluation issue for a recovery owner.
       const outcome = await createOrUpdateStaleRunEvaluation({ run, now });
       if (outcome.kind === "created") result.created += 1;
       else if (outcome.kind === "existing") result.existing += 1;

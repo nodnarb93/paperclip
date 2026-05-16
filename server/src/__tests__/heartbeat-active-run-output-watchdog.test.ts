@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agents,
   companies,
@@ -183,6 +183,18 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
     return { companyId, managerId, coderId, issueId, runId, issuePrefix };
   }
+
+  // PATCH(nodnarb93): silent-run auto-cancel (Patch 28) — these tests cover the
+  // legacy eval-issue path which is now gated behind
+  // PAPERCLIP_SILENT_RUN_AUTO_CANCEL_ENABLED=false. The new auto-cancel path
+  // (default) is covered in the separate describe block below.
+  describe("legacy eval-issue path (auto-cancel disabled)", () => {
+    beforeEach(() => {
+      vi.stubEnv("PAPERCLIP_SILENT_RUN_AUTO_CANCEL_ENABLED", "false");
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
 
   it("creates one medium-priority evaluation issue for a suspicious silent run", async () => {
     const now = new Date("2026-04-22T20:00:00.000Z");
@@ -600,5 +612,117 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       createdByRunId: randomUUID(),
     });
     expect(decision.createdByRunId).toBe(managerRunId);
+  });
+  }); // end describe("legacy eval-issue path")
+
+  // PATCH(nodnarb93): silent-run auto-cancel (Patch 28) — default behavior tests.
+  describe("auto-cancel path (default)", () => {
+    async function seedBoardUser(companyId: string) {
+      const userId = `user-${randomUUID()}`;
+      await db.execute(sql`
+        INSERT INTO "company_memberships" (company_id, principal_type, principal_id, status, membership_role)
+        VALUES (${companyId}::uuid, 'user', ${userId}, 'active', 'board')
+      `);
+      return userId;
+    }
+
+    it("cancels the silent run, comments on the source issue, and reassigns it to the recovery owner", async () => {
+      const now = new Date("2026-04-22T20:00:00.000Z");
+      const seed = await seedRunningRun({
+        now,
+        ageMs: 31 * 60 * 1000, // 31 min — just past the 30 min auto-cancel default
+      });
+      await seedBoardUser(seed.companyId);
+      const heartbeat = heartbeatService(db);
+
+      const result = await heartbeat.scanSilentActiveRuns({ now, companyId: seed.companyId });
+
+      expect(result).toMatchObject({ scanned: 1, autoCancelled: 1, created: 0 });
+      expect(result.cancelledRunIds).toEqual([seed.runId]);
+
+      // Run is cancelled
+      const [cancelledRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seed.runId));
+      expect(cancelledRun?.status).toBe("cancelled");
+      expect(cancelledRun?.errorCode).toBe("cancelled");
+
+      // Source issue has been reassigned to the recovery owner (managerId / CTO)
+      const [sourceIssue] = await db.select().from(issues).where(eq(issues.id, seed.issueId));
+      expect(sourceIssue?.assigneeAgentId).toBe(seed.managerId);
+      expect(sourceIssue?.assigneeUserId).toBeNull();
+
+      // No eval issue was created
+      const evaluations = await db
+        .select()
+        .from(issues)
+        .where(and(eq(issues.companyId, seed.companyId), eq(issues.originKind, "stale_active_run_evaluation")));
+      expect(evaluations).toHaveLength(0);
+
+      // A comment was posted on the source issue
+      const comments = await db.execute(sql`
+        SELECT body FROM "issue_comments"
+        WHERE issue_id = ${seed.issueId}::uuid AND created_by_run_id = ${seed.runId}::uuid
+      `);
+      const commentRows = Array.isArray(comments) ? comments : (comments as { rows: unknown[] }).rows;
+      expect(commentRows.length).toBeGreaterThanOrEqual(1);
+      const firstComment = commentRows[0] as { body?: string };
+      expect(firstComment?.body ?? "").toContain("auto-cancelled this issue's active run");
+    });
+
+    it("loop guard: escalates to the board user when the recovery owner would be the silent agent itself", async () => {
+      const now = new Date("2026-04-22T20:00:00.000Z");
+      // Run is owned by the manager/CTO themselves — resolveStaleRunOwnerAgentId
+      // would resolve to the same agent, so the loop guard must kick in.
+      const seed = await seedRunningRun({
+        now,
+        ageMs: 31 * 60 * 1000,
+      });
+      const boardUserId = await seedBoardUser(seed.companyId);
+
+      // Re-point the run + source issue at the manager (CTO) so manager IS the silent agent.
+      await db.update(heartbeatRuns).set({ agentId: seed.managerId }).where(eq(heartbeatRuns.id, seed.runId));
+      await db.update(issues).set({ assigneeAgentId: seed.managerId }).where(eq(issues.id, seed.issueId));
+
+      // Sanity-check that the row write actually persisted before the scan runs —
+      // catches test-isolation glitches where a leftover connection/transaction
+      // could keep stale state in view.
+      const [preCheck] = await db.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(eq(heartbeatRuns.id, seed.runId));
+      expect(preCheck?.agentId).toBe(seed.managerId);
+
+      const heartbeat = heartbeatService(db);
+      const result = await heartbeat.scanSilentActiveRuns({ now, companyId: seed.companyId });
+      expect(result).toMatchObject({ autoCancelled: 1 });
+
+      const [sourceIssue] = await db.select().from(issues).where(eq(issues.id, seed.issueId));
+      expect(sourceIssue?.assigneeAgentId).toBeNull();
+      expect(sourceIssue?.assigneeUserId).toBe(boardUserId);
+      expect(sourceIssue?.status).toBe("blocked");
+    });
+
+    it("respects PAPERCLIP_SILENT_RUN_AUTO_CANCEL_AFTER_MS for the threshold", async () => {
+      vi.stubEnv("PAPERCLIP_SILENT_RUN_AUTO_CANCEL_AFTER_MS", String(5 * 60 * 1000)); // 5 minutes
+      try {
+        const now = new Date("2026-04-22T20:00:00.000Z");
+        const seed = await seedRunningRun({ now, ageMs: 6 * 60 * 1000 }); // 6 min — past 5 min, NOT past default 30 min
+        await seedBoardUser(seed.companyId);
+        const heartbeat = heartbeatService(db);
+        const result = await heartbeat.scanSilentActiveRuns({ now, companyId: seed.companyId });
+        expect(result).toMatchObject({ autoCancelled: 1 });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("does not re-fire on subsequent scans once a run has been cancelled", async () => {
+      const now = new Date("2026-04-22T20:00:00.000Z");
+      const seed = await seedRunningRun({ now, ageMs: 31 * 60 * 1000 });
+      await seedBoardUser(seed.companyId);
+      const heartbeat = heartbeatService(db);
+
+      const first = await heartbeat.scanSilentActiveRuns({ now, companyId: seed.companyId });
+      expect(first.autoCancelled).toBe(1);
+
+      const second = await heartbeat.scanSilentActiveRuns({ now, companyId: seed.companyId });
+      expect(second).toMatchObject({ scanned: 0, autoCancelled: 0, created: 0 });
+    });
   });
 });

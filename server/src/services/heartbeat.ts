@@ -2004,7 +2004,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
-  const recovery = recoveryService(db, { enqueueWakeup });
+  // PATCH(nodnarb93): silent-run auto-cancel (Patch 28) — env-tunable threshold + kill switch.
+  // cancelRun is forward-referenced through a wrapper because cancelRunInternal is
+  // defined later in this file and would otherwise be undefined when recoveryService
+  // captures the dep.
+  const autoCancelSilentRunEnabled = process.env.PAPERCLIP_SILENT_RUN_AUTO_CANCEL_ENABLED !== "false";
+  const autoCancelSilentRunAfterMs = Math.max(
+    60_000,
+    Number(process.env.PAPERCLIP_SILENT_RUN_AUTO_CANCEL_AFTER_MS) || 30 * 60 * 1000,
+  );
+  const recovery = recoveryService(db, {
+    enqueueWakeup,
+    cancelRun: (runId, reason) => cancelRunInternal(runId, reason),
+    autoCancelSilentRunEnabled,
+    autoCancelSilentRunAfterMs,
+  });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
 
