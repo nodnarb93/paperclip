@@ -873,11 +873,23 @@ export function applyPaperclipWorkspaceEnv(
 export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   for (const key of Object.keys(env)) {
-    if (!key.startsWith("PAPERCLIP_")) continue;
-    if (key === "PAPERCLIP_RUNTIME_API_URL") continue;
-    if (key === "PAPERCLIP_LISTEN_HOST") continue;
-    if (key === "PAPERCLIP_LISTEN_PORT") continue;
-    delete env[key];
+    if (key.startsWith("PAPERCLIP_")) {
+      if (key === "PAPERCLIP_RUNTIME_API_URL") continue;
+      if (key === "PAPERCLIP_LISTEN_HOST") continue;
+      if (key === "PAPERCLIP_LISTEN_PORT") continue;
+      delete env[key];
+      continue;
+    }
+    // PATCH(nodnarb93): also strip Node toolchain env so spawned agent child
+    // processes don't inherit Paperclip server's NODE_ENV=production (which
+    // makes `npm install` skip devDeps and breaks Playwright et al). Patch 31.
+    if (key === "NODE_ENV" || key === "NODE_OPTIONS") {
+      delete env[key];
+      continue;
+    }
+    if (/^npm_config_/i.test(key)) {
+      delete env[key];
+    }
   }
   return env;
 }

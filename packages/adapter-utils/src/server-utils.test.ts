@@ -7,6 +7,7 @@ import {
   renderPaperclipWakePrompt,
   runningProcesses,
   runChildProcess,
+  sanitizeInheritedPaperclipEnv,
   stringifyPaperclipWakePayload,
 } from "./server-utils.js";
 
@@ -477,5 +478,63 @@ describe("appendWithByteCap", () => {
     expect(output).not.toContain("\uFFFD");
     expect(Buffer.from(output, "utf8").toString("utf8")).toBe(output);
     expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(7);
+  });
+});
+
+describe("sanitizeInheritedPaperclipEnv", () => {
+  it("strips NODE_ENV", () => {
+    const result = sanitizeInheritedPaperclipEnv({ NODE_ENV: "production" });
+    expect(result.NODE_ENV).toBeUndefined();
+  });
+
+  it("strips NODE_OPTIONS", () => {
+    const result = sanitizeInheritedPaperclipEnv({ NODE_OPTIONS: "--enable-source-maps" });
+    expect(result.NODE_OPTIONS).toBeUndefined();
+  });
+
+  it("strips lowercase npm_config_* keys", () => {
+    const result = sanitizeInheritedPaperclipEnv({
+      npm_config_production: "true",
+      npm_config_cache: "/tmp/npm",
+    });
+    expect(result.npm_config_production).toBeUndefined();
+    expect(result.npm_config_cache).toBeUndefined();
+  });
+
+  it("strips uppercase NPM_CONFIG_* keys", () => {
+    const result = sanitizeInheritedPaperclipEnv({
+      NPM_CONFIG_PRODUCTION: "true",
+      NPM_CONFIG_REGISTRY: "https://registry.example.com",
+    });
+    expect(result.NPM_CONFIG_PRODUCTION).toBeUndefined();
+    expect(result.NPM_CONFIG_REGISTRY).toBeUndefined();
+  });
+
+  it("preserves unrelated env keys", () => {
+    const result = sanitizeInheritedPaperclipEnv({
+      PATH: "/usr/bin:/bin",
+      HOME: "/home/user",
+      LANG: "en_US.UTF-8",
+      PAPERCLIP_RUNTIME_API_URL: "http://localhost:4000/api",
+    });
+    expect(result.PATH).toBe("/usr/bin:/bin");
+    expect(result.HOME).toBe("/home/user");
+    expect(result.LANG).toBe("en_US.UTF-8");
+    expect(result.PAPERCLIP_RUNTIME_API_URL).toBe("http://localhost:4000/api");
+  });
+
+  it("strips PAPERCLIP_* keys that are not on the allowlist", () => {
+    const result = sanitizeInheritedPaperclipEnv({
+      PAPERCLIP_RUNTIME_API_URL: "http://localhost:4000/api",
+      PAPERCLIP_LISTEN_HOST: "0.0.0.0",
+      PAPERCLIP_LISTEN_PORT: "4000",
+      PAPERCLIP_WORKSPACE_ID: "workspace-1",
+      PAPERCLIP_API_KEY: "secret",
+    });
+    expect(result.PAPERCLIP_RUNTIME_API_URL).toBe("http://localhost:4000/api");
+    expect(result.PAPERCLIP_LISTEN_HOST).toBe("0.0.0.0");
+    expect(result.PAPERCLIP_LISTEN_PORT).toBe("4000");
+    expect(result.PAPERCLIP_WORKSPACE_ID).toBeUndefined();
+    expect(result.PAPERCLIP_API_KEY).toBeUndefined();
   });
 });
